@@ -64,58 +64,43 @@ fn show_threads(db: &notmuch::Database, str: &str) -> Result<()> {
     Ok(())
 }
 
-fn show_message_thread(db: &notmuch::Database, str: &str) -> Result<()>{
-    let query = db.create_query(&str).unwrap();
-    let threads = query.search_threads().unwrap();
-    for thread in threads {
-        let mut tquery : String = "thread:".to_owned();
-        tquery.push_str(&thread.id().to_string());
-        show_messages(db, &tquery)?
+// XXX Ordering on both these functions are bad, we get junk in searches
+fn show_before_message(db: &notmuch::Database, id: &str, filter: &Option<&str>) -> Result<()>{
+    let mut query = format!("thread:{{mid:{}}}", id);
+    if let Some(stri) = filter {
+        query.push_str(" and ");
+        query.push_str(&stri);
     }
+    let q = db.create_query(&query).unwrap();
+    let messages = q.search_messages().unwrap();
+    for message in messages {
+        if message.id().to_string() == id.to_string() {
+            break;
+        }
+        show_message(&message)?;
+    }
+    // }
     Ok(())
 }
 
-fn show_before_message(db: &notmuch::Database, id: &str) -> Result<()>{
-    let mut tquery = "mid:".to_owned();
-    tquery.push_str(&id.to_string());
-    let query = db.create_query(&tquery).unwrap();
-    let threads = query.search_threads().unwrap();
-    for thread in threads {
-        let mut mquery : String = "thread:".to_owned();
-        mquery.push_str(&thread.id().to_string());
-        let q = db.create_query(&mquery).unwrap();
-        let messages = q.search_messages().unwrap();
-        for message in messages {
-            if message.id().to_string() == id.to_string() {
-                break;
-            }
-            show_message(&message)?;
-        }
+fn show_after_message(db: &notmuch::Database, id: &str, filter: &Option<&str>) -> Result<()> {
+    let mut query = format!("thread:{{mid:{}}}", id);
+    if let Some(stri) = filter {
+        query.push_str(" and ");
+        query.push_str(&stri);
     }
-    Ok(())
-}
-
-fn show_after_message(db: &notmuch::Database, id: &str) -> Result<()> {
-    let mut tquery = "mid:".to_owned();
-    tquery.push_str(&id.to_string());
-    let query = db.create_query(&tquery).unwrap();
-    let threads = query.search_threads().unwrap();
-    for thread in threads {
-        let mut mquery : String = "thread:".to_owned();
-        mquery.push_str(&thread.id().to_string());
-        let q = db.create_query(&mquery).unwrap();
-        let messages = q.search_messages().unwrap();
-        let mut seen = false;
-        for message in messages {
-            if message.id().to_string() == id.to_string() {
-                seen = true;
-                continue;
-            }
-            if !seen {
-                continue;
-            }
-            show_message(&message)?;
+    let q = db.create_query(&query).unwrap();
+    let messages = q.search_messages().unwrap();
+    let mut seen = false;
+    for message in messages {
+        if message.id().to_string() == id.to_string() {
+            seen = true;
+            continue;
         }
+        if !seen {
+            continue;
+        }
+        show_message(&message)?;
     }
     Ok(())
 }
@@ -128,13 +113,29 @@ fn main() -> Result<()>{
     }
     let none: Option<&Path> = None;
     let db = notmuch::Database::open(none, notmuch::DatabaseMode::ReadOnly).unwrap();
-    // let query = db.create_query(&args[2..].join(" ")).unwrap();
     match args[1].as_str() {
         "message" => show_messages(&db, &args[2..].join(" "))?,
         "thread" => show_threads(&db, &args[2..].join(" "))?,
-        "thread-message" => show_message_thread(&db, &args[2..].join(" "))?,
-        "message-before" => show_before_message(&db, &args[2])?,
-        "message-after" => show_after_message(&db, &args[2])?,
+        "message-before" => {
+            if args.len() > 3 {
+                let str = args[3..].join(" ");
+                if str != "" {
+                    show_before_message(&db, &args[2], &Some(&str))?;
+                    return Ok(())
+                }
+            }
+            show_before_message(&db, &args[2], &None)?
+        },
+        "message-after" => {
+            if args.len() > 3 {
+                let str = args[3..].join(" ");
+                if str != "" {
+                    show_after_message(&db, &args[2], &Some(&str))?;
+                    return Ok(())
+                }
+            }
+            show_after_message(&db, &args[2], &None)?
+        },
         _ => {
             println!("Need a print mode:message|thread|thread-messages|message-before|message-after");
             return Ok(()) 
