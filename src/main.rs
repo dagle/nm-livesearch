@@ -1,10 +1,16 @@
-use std::path::Path;
+use std::{path::Path, str::FromStr};
 use std::env;
 extern crate home;
 extern crate notmuch;
 use notmuch::Query;
+use notmuch::Sort;
 use serde::{Deserialize, Serialize};
 use serde_json::Result;
+use std::fmt::{Debug, Display};
+
+use std::path::PathBuf;
+
+use clap::{Parser, Subcommand};
 
 #[derive(Serialize, Deserialize)]
 struct Thread {
@@ -24,6 +30,16 @@ struct Message {
     subject: String,
 }
 
+fn from_str(s: &str) -> Sort {
+        match s {
+            "oldest" => Sort::OldestFirst,
+            "newest" => Sort::NewestFirst,
+            "message-id" => Sort::MessageID,
+            "unsorted" => Sort::Unsorted,
+            _ => panic!("Bad sort option")
+        }
+}
+
 
 fn show_message(message: &notmuch::Message) -> Result<()> {
         let ser = Message {
@@ -38,8 +54,10 @@ fn show_message(message: &notmuch::Message) -> Result<()> {
     Ok(())
 }
 
-fn show_messages(db: &notmuch::Database, str: &str) -> Result<()> {
+fn show_messages(db: &notmuch::Database, sort: Sort, str: &str) -> Result<()> {
     let query = db.create_query(&str).unwrap();
+    query.set_sort(sort);
+    // query.add_tag_exclude(tag)
     let messages = query.search_messages().unwrap();
     for message in messages {
         show_message(&message)?;
@@ -47,8 +65,9 @@ fn show_messages(db: &notmuch::Database, str: &str) -> Result<()> {
     Ok(())
 }
 
-fn show_threads(db: &notmuch::Database, str: &str) -> Result<()> {
+fn show_threads(db: &notmuch::Database, sort: Sort, str: &str) -> Result<()> {
     let query = db.create_query(&str).unwrap();
+    query.set_sort(sort);
     let threads = query.search_threads().unwrap();
     for thread in threads {
         let ser = Thread {
@@ -105,41 +124,65 @@ fn show_after_message(db: &notmuch::Database, id: &str, filter: &Option<&str>) -
     Ok(())
 }
 
+#[derive(Parser)]
+#[clap(author, version, about, long_about = None)]
+struct Cli {
+    #[clap(short, long, value_name = "oldest|newest")]
+    #[clap(default_value_t = String::from("oldest"))]
+    sort: String,
+
+    #[clap(short, long, parse(from_os_str), value_name = "FILE")]
+    db_path: Option<PathBuf>,
+
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    Message {
+        #[clap(required = true)]
+        search: Vec<String>,
+    },
+    Thread {
+        #[clap(required = true)]
+        search: Vec<String>,
+    },
+    MessageBefore {
+        id: String,
+        search: Vec<String>,
+    },
+    MessageAfter {
+        id: String,
+        search: Vec<String>,
+    },
+}
+
+
 // A bit clunky atm but works using in tools
 fn main() -> Result<()>{
-    let args: Vec<String> = env::args().collect();
-    if args.len() < 3 {
-        println!("nm needs 3 argumnts or more")
-    }
-    let none: Option<&Path> = None;
-    let db = notmuch::Database::open(none, notmuch::DatabaseMode::ReadOnly).unwrap();
-    match args[1].as_str() {
-        "message" => show_messages(&db, &args[2..].join(" "))?,
-        "thread" => show_threads(&db, &args[2..].join(" "))?,
-        "message-before" => {
-            if args.len() > 3 {
-                let str = args[3..].join(" ");
-                if str != "" {
-                    show_before_message(&db, &args[2], &Some(&str))?;
-                    return Ok(())
-                }
+    let args = Cli::parse();
+
+    let db = notmuch::Database::open(args.db_path, notmuch::DatabaseMode::ReadOnly).unwrap();
+    let sort = from_str(&args.sort);
+
+    match &args.command {
+        Commands::Message{search} => show_messages(&db, sort, &search.join(" "))?,
+        Commands::Thread{search} => show_threads(&db, sort, &search.join(" "))?,
+        Commands::MessageBefore{id, search} => {
+            if search.is_empty() {
+                show_before_message(&db, id, &None)?
             }
-            show_before_message(&db, &args[2], &None)?
+            let args = search.join(" ");
+            show_before_message(&db, id, &Some(&args))?
         },
-        "message-after" => {
-            if args.len() > 3 {
-                let str = args[3..].join(" ");
-                if str != "" {
-                    show_after_message(&db, &args[2], &Some(&str))?;
-                    return Ok(())
-                }
+        Commands::MessageAfter{id, search} => {
+            if search.is_empty() {
+                show_after_message(&db, id, &None)?
             }
-            show_after_message(&db, &args[2], &None)?
+            let args = search.join(" ");
+            show_after_message(&db, id, &Some(&args))?
         },
-        _ => {
-            println!("Need a print mode:message|thread|thread-messages|message-before|message-after");
-            return Ok(()) 
-        }
     }
     Ok(())
 }
