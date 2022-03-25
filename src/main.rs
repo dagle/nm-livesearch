@@ -24,9 +24,10 @@ struct Thread {
 #[derive(Serialize, Deserialize)]
 struct Message {
     id: String,
-    date: i64,
     filename: String,
+    date: i64,
     tags: Vec<String>,
+    from: String,
     subject: String,
 }
 
@@ -42,17 +43,109 @@ fn from_str(s: &str) -> Sort {
 
 
 fn show_message(message: &notmuch::Message) -> Result<()> {
-        let ser = Message {
-            id: message.id().to_string(),
-            date: message.date(),
-            filename: message.filename().to_str().unwrap_or("").to_owned(),
-            tags: message.tags().collect(),
-            subject: message.header("Subject").unwrap().unwrap().to_string()
-        };
-        let j = serde_json::to_string(&ser)?;
-        println!("{}", j);
+    let ser = Message {
+        id: message.id().to_string(),
+        date: message.date(),
+        filename: message.filename().to_str().unwrap_or("").to_owned(),
+        tags: message.tags().collect(),
+        subject: message.header("Subject").unwrap().unwrap().to_string(),
+        from: message.header("From").unwrap().unwrap().to_string(),
+    };
+    let j = serde_json::to_string(&ser)?;
+    println!("{}", j);
     Ok(())
 }
+
+#[derive(Serialize, Deserialize)]
+struct TreeMessage {
+    id: String,
+    tid: String,
+    filename: String,
+    level: i32,
+    pre: String,
+    index: i32,
+    total: i32,
+    date: i64,
+    from: String,
+    sub: String,
+    tags: Vec<String>,
+    matched: bool,
+    excluded: bool,
+
+}
+fn get_message(message: &notmuch::Message, tid: &str, level: i32, prestring: String, num: i32, i: i32, total: i32) -> TreeMessage {
+    TreeMessage {
+        id: message.id().to_string(),
+        tid: tid.to_string(),
+        filename: message.filename().to_str().unwrap_or("").to_owned(),
+        level,
+        pre: prestring,
+        index: i,
+        total,
+        date: message.date(),
+        tags: message.tags().collect(),
+        sub: message.header("Subject").unwrap().unwrap().to_string(),
+        from: message.header("From").unwrap().unwrap().to_string(),
+        matched: false,
+        excluded: false,
+    }
+}
+
+fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, tid: &str, vec: &mut Vec<TreeMessage>) -> Result<i32> {
+    let mut j = 1;
+    let length = messages.len();
+    let mut n = num;
+    for message in messages {
+        let mut newstring: String = prestring.clone();
+        if n == 0 {
+        } else if j == length {
+            newstring.push_str("├─")
+        } else {
+            newstring.push_str("└─")
+        }
+
+        let replies = message.replies();
+        let replies_vec: Vec<notmuch::Message> = replies.collect();
+
+        if replies_vec.len()  > 0 {
+            newstring.push_str("┬")
+        } else {
+            newstring.push_str("─")
+        }
+
+        let message = get_message(&message, tid, level, newstring, n + 1, num, total);
+        vec.push(message);
+
+        let mut newstring: String = prestring.clone();
+        if n == 0 {
+        } else if length > j {
+            newstring.push_str("│ ")
+        } else {
+            newstring.push_str("  ")
+        }
+        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, tid, vec)?;
+        j += 1;
+    }
+    Ok(n)
+}
+
+fn show_thread_tree(db: &notmuch::Database, sort: Sort, search: &str) -> Result<()> {
+    let query = db.create_query(search).unwrap();
+    query.set_sort(sort);
+    let threads = query.search_threads().unwrap();
+    for thread in threads {
+        let total = thread.total_messages();
+        let messages = thread.toplevel_messages();
+        let mut vec: Vec<TreeMessage> = Vec::new();
+        let tid = thread.id();
+        let mvec = messages.collect();
+        show_message_tree(&mvec, 0, "".to_string(), 0, total, tid, &mut vec)?;
+        let j = serde_json::to_string(&vec)?;
+        println!("{}", j);
+    }
+    Ok(())
+}
+
 
 fn show_messages(db: &notmuch::Database, sort: Sort, str: &str) -> Result<()> {
     let query = db.create_query(&str).unwrap();
@@ -148,6 +241,10 @@ enum Commands {
         #[clap(required = true)]
         search: Vec<String>,
     },
+    Tree {
+        #[clap(required = true)]
+        search: Vec<String>,
+    },
     MessageBefore {
         id: String,
         search: Vec<String>,
@@ -169,6 +266,7 @@ fn main() -> Result<()>{
     match &args.command {
         Commands::Message{search} => show_messages(&db, sort, &search.join(" "))?,
         Commands::Thread{search} => show_threads(&db, sort, &search.join(" "))?,
+        Commands::Tree{search} => show_thread_tree(&db, sort, &search.join(" "))?,
         Commands::MessageBefore{id, search} => {
             if search.is_empty() {
                 show_before_message(&db, id, &None)?
