@@ -1,34 +1,99 @@
-use std::{path::Path, str::FromStr};
-use std::env;
+use std::{borrow::Cow, io};
+use std::{error, fmt, result};
 extern crate home;
 extern crate notmuch;
-use notmuch::Query;
 use notmuch::Sort;
-use serde::{Deserialize, Serialize};
-use serde_json::Result;
-use std::fmt::{Debug, Display};
+use serde::Serialize;
+use serde::ser::SerializeStruct;
+use std::fmt::Debug;
 
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
-#[derive(Serialize, Deserialize)]
-struct Thread {
-    id: String,
-    date: i64,
-    tags: Vec<String>,
-    subject: String,
-    authors: Vec<String>,
+type Result<T> = result::Result<T, Error>;
+
+#[derive(Debug)]
+enum Error {
+    SerdeErr(serde_json::Error),
+    NmError(notmuch::Error),
 }
 
-#[derive(Serialize, Deserialize)]
-struct Message {
-    id: String,
-    filename: String,
-    date: i64,
-    tags: Vec<String>,
-    from: String,
-    subject: String,
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Error::SerdeErr(e) => <serde_json::Error as fmt::Display>::fmt(e, f),
+            Error::NmError(e) => <notmuch::Error as fmt::Display>::fmt(e, f),
+        }
+    }
+}
+
+impl error::Error for Error {
+    fn source(&self) -> Option<&(dyn error::Error + 'static)> {
+        match &self {
+            Error::SerdeErr(e) => Some(e),
+            Error::NmError(e) => Some(e),
+        }
+    }
+}
+
+impl std::convert::From<notmuch::Error> for Error {
+    fn from(err: notmuch::Error) -> Error {
+        Error::NmError(err)
+    }
+}
+
+impl std::convert::From<serde_json::Error> for Error {
+    fn from(err: serde_json::Error) -> Error {
+        Error::SerdeErr(err)
+    }
+}
+
+struct Thread<'a>(&'a notmuch::Thread);
+
+impl<'a> Serialize for Thread<'a> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+            let mut mes = serializer.serialize_struct("Message", 5)?;
+            let id = self.0.id();
+            mes.serialize_field("id", &id)?;
+            let date = self.0.newest_date();
+            mes.serialize_field("date", &date)?;
+            let tags: Vec<String> = self.0.tags().collect();
+            mes.serialize_field("tags", &tags)?;
+            let authors = self.0.authors();
+            mes.serialize_field("authors", &authors)?;
+            let subject = self.0.subject();
+            mes.serialize_field("subject", &subject)?;
+            mes.end()
+    }
+}
+
+struct Message<'a>(&'a notmuch::Message);
+
+impl<'a> Serialize for Message<'a> {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer {
+            use serde::ser::Error;
+            let mut mes = serializer.serialize_struct("Message", 7)?;
+            let id = self.0.id();
+            mes.serialize_field("id", &id)?;
+            let date = self.0.date();
+            mes.serialize_field("date", &date)?;
+            let filename = self.0.filename();
+            mes.serialize_field("filename", &filename)?;
+            let filenames: Vec<PathBuf> = self.0.filenames().collect();
+            mes.serialize_field("filnames", &filenames)?;
+            let tags: Vec<String> = self.0.tags().collect();
+            mes.serialize_field("tags", &tags)?;
+            let from = self.0.header("From").map_err(Error::custom)?.unwrap_or_else(|| Cow::from(""));
+            mes.serialize_field("from", &from)?;
+            let subject = self.0.header("Subject").map_err(Error::custom)?.unwrap_or_else(|| Cow::from(""));
+            mes.serialize_field("subject", &subject)?;
+            mes.end()
+    }
 }
 
 fn from_str(s: &str) -> Sort {
@@ -41,178 +106,79 @@ fn from_str(s: &str) -> Sort {
         }
 }
 
-
-fn show_message(message: &notmuch::Message) -> Result<()> {
-    let ser = Message {
-        id: message.id().to_string(),
-        date: message.date(),
-        filename: message.filename().to_str().unwrap_or("").to_owned(),
-        tags: message.tags().collect(),
-        subject: message.header("Subject").unwrap().unwrap().to_string(),
-        from: message.header("From").unwrap().unwrap().to_string(),
-    };
-    let j = serde_json::to_string(&ser)?;
-    println!("{}", j);
+fn show_message<W>(message: &notmuch::Message, writer: &mut W) -> Result<()> 
+    where W: io::Write {
+    let ser = Message(message);
+    serde_json::to_writer(writer, &ser)?;
     Ok(())
 }
 
-#[derive(Serialize, Deserialize)]
-struct TreeMessage {
-    id: String,
-    tid: String,
-    filename: String,
-    level: i32,
-    pre: String,
-    index: i32,
-    total: i32,
-    date: i64,
-    from: String,
-    sub: String,
-    tags: Vec<String>,
-    matched: bool,
-    excluded: bool,
-
-}
-fn get_message(message: &notmuch::Message, tid: &str, level: i32, prestring: String, num: i32, i: i32, total: i32) -> TreeMessage {
-    TreeMessage {
-        id: message.id().to_string(),
-        tid: tid.to_string(),
-        filename: message.filename().to_str().unwrap_or("").to_owned(),
-        level,
-        pre: prestring,
-        index: i,
-        total,
-        date: message.date(),
-        tags: message.tags().collect(),
-        sub: message.header("Subject").unwrap().unwrap().to_string(),
-        from: message.header("From").unwrap().unwrap().to_string(),
-        matched: false,
-        excluded: false,
-    }
+fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()> 
+    where W: io::Write {
+    let ser = Thread(&thread);
+    serde_json::to_writer(writer, &ser)?;
+    Ok(())
 }
 
-fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, tid: &str, vec: &mut Vec<TreeMessage>) -> Result<i32> {
-    let mut j = 1;
-    let length = messages.len();
-    let mut n = num;
+fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
+    where W: io::Write {
+    let query = db.create_query(str)?;
+    query.set_sort(sort);
+    let messages = query.search_messages()?;
     for message in messages {
-        let mut newstring: String = prestring.clone();
-        if n == 0 {
-        } else if j == length {
-            newstring.push_str("├─")
-        } else {
-            newstring.push_str("└─")
-        }
-
-        let replies = message.replies();
-        let replies_vec: Vec<notmuch::Message> = replies.collect();
-
-        if replies_vec.len()  > 0 {
-            newstring.push_str("┬")
-        } else {
-            newstring.push_str("─")
-        }
-
-        let message = get_message(&message, tid, level, newstring, n + 1, num, total);
-        vec.push(message);
-
-        let mut newstring: String = prestring.clone();
-        if n == 0 {
-        } else if length > j {
-            newstring.push_str("│ ")
-        } else {
-            newstring.push_str("  ")
-        }
-        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, tid, vec)?;
-        j += 1;
+        show_message(&message, writer)?;
     }
-    Ok(n)
+    Ok(())
 }
 
-fn show_thread_tree(db: &notmuch::Database, sort: Sort, search: &str) -> Result<()> {
-    let query = db.create_query(search).unwrap();
+fn show_threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
+    where W: io::Write {
+    let query = db.create_query(str)?;
     query.set_sort(sort);
-    let threads = query.search_threads().unwrap();
+    let threads = query.search_threads()?;
     for thread in threads {
-        let total = thread.total_messages();
-        let messages = thread.toplevel_messages();
-        let mut vec: Vec<TreeMessage> = Vec::new();
-        let tid = thread.id();
-        let mvec = messages.collect();
-        show_message_tree(&mvec, 0, "".to_string(), 0, total, tid, &mut vec)?;
-        let j = serde_json::to_string(&vec)?;
-        println!("{}", j);
+        show_thread(&thread, writer)?;
     }
     Ok(())
 }
 
-
-fn show_messages(db: &notmuch::Database, sort: Sort, str: &str) -> Result<()> {
-    let query = db.create_query(&str).unwrap();
-    query.set_sort(sort);
-    // query.add_tag_exclude(tag)
-    let messages = query.search_messages().unwrap();
-    for message in messages {
-        show_message(&message)?;
-    }
-    Ok(())
-}
-
-fn show_threads(db: &notmuch::Database, sort: Sort, str: &str) -> Result<()> {
-    let query = db.create_query(&str).unwrap();
-    query.set_sort(sort);
-    let threads = query.search_threads().unwrap();
-    for thread in threads {
-        let ser = Thread {
-            id: thread.id().to_string(),
-            date: thread.newest_date(),
-            tags: thread.tags().collect(),
-            subject: thread.subject().to_string(),
-            authors: thread.authors(),
-        };
-        let j = serde_json::to_string(&ser)?;
-        println!("{}", j);
-    }
-    Ok(())
-}
-
-// XXX Ordering on both these functions are bad, we get junk in searches
-fn show_before_message(db: &notmuch::Database, id: &str, filter: &Option<&str>) -> Result<()>{
+fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
+    where W: io::Write {
     let mut query = format!("thread:{{mid:{}}}", id);
-    if let Some(stri) = filter {
+    if let Some(str) = filter {
         query.push_str(" and ");
-        query.push_str(&stri);
+        query.push_str(str);
     }
-    let q = db.create_query(&query).unwrap();
-    let messages = q.search_messages().unwrap();
+    let q = db.create_query(&query)?;
+    let messages = q.search_messages()?;
     for message in messages {
-        if message.id().to_string() == id.to_string() {
+        if message.id() == id {
             break;
         }
-        show_message(&message)?;
+        show_message(&message, writer)?;
     }
-    // }
     Ok(())
 }
 
-fn show_after_message(db: &notmuch::Database, id: &str, filter: &Option<&str>) -> Result<()> {
+fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
+    where W: io::Write {
     let mut query = format!("thread:{{mid:{}}}", id);
-    if let Some(stri) = filter {
+    if let Some(str) = filter {
         query.push_str(" and ");
-        query.push_str(&stri);
+        query.push_str(str);
     }
-    let q = db.create_query(&query).unwrap();
-    let messages = q.search_messages().unwrap();
+    let q = db.create_query(&query)?;
+    let messages = q.search_messages()?;
     let mut seen = false;
     for message in messages {
-        if message.id().to_string() == id.to_string() {
+        if message.id() == id {
             seen = true;
             continue;
         }
         if !seen {
             continue;
         }
-        show_message(&message)?;
+        show_message(&message, writer)?;
     }
     Ok(())
 }
@@ -241,10 +207,6 @@ enum Commands {
         #[clap(required = true)]
         search: Vec<String>,
     },
-    Tree {
-        #[clap(required = true)]
-        search: Vec<String>,
-    },
     MessageBefore {
         id: String,
         search: Vec<String>,
@@ -256,30 +218,31 @@ enum Commands {
 }
 
 
-// A bit clunky atm but works using in tools
 fn main() -> Result<()>{
     let args = Cli::parse();
 
-    let db = notmuch::Database::open(args.db_path, notmuch::DatabaseMode::ReadOnly).unwrap();
+    let db = notmuch::Database::open(args.db_path, notmuch::DatabaseMode::ReadOnly)?;
     let sort = from_str(&args.sort);
+    let mut writer = std::io::BufWriter::new(io::stdout().lock());
 
     match &args.command {
-        Commands::Message{search} => show_messages(&db, sort, &search.join(" "))?,
-        Commands::Thread{search} => show_threads(&db, sort, &search.join(" "))?,
-        Commands::Tree{search} => show_thread_tree(&db, sort, &search.join(" "))?,
+        Commands::Message{search} => show_messages(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::Thread{search} => show_threads(&db, sort, &search.join(" "), &mut writer)?,
         Commands::MessageBefore{id, search} => {
             if search.is_empty() {
-                show_before_message(&db, id, &None)?
+                show_before_message(&db, id, &None, &mut writer)?;
+                return Ok(())
             }
             let args = search.join(" ");
-            show_before_message(&db, id, &Some(&args))?
+            show_before_message(&db, id, &Some(&args), &mut writer)?
         },
         Commands::MessageAfter{id, search} => {
             if search.is_empty() {
-                show_after_message(&db, id, &None)?
+                show_after_message(&db, id, &None, &mut writer)?;
+                return Ok(())
             }
             let args = search.join(" ");
-            show_after_message(&db, id, &Some(&args))?
+            show_after_message(&db, id, &Some(&args), &mut writer)?
         },
     }
     Ok(())
