@@ -17,6 +17,7 @@ type Result<T> = result::Result<T, Error>;
 enum Error {
     SerdeErr(serde_json::Error),
     NmError(notmuch::Error),
+    IoError(io::Error),
 }
 
 impl fmt::Display for Error {
@@ -24,6 +25,7 @@ impl fmt::Display for Error {
         match self {
             Error::SerdeErr(e) => <serde_json::Error as fmt::Display>::fmt(e, f),
             Error::NmError(e) => <notmuch::Error as fmt::Display>::fmt(e, f),
+            Error::IoError(e) => <io::Error as fmt::Display>::fmt(e,f),
         }
     }
 }
@@ -33,7 +35,14 @@ impl error::Error for Error {
         match &self {
             Error::SerdeErr(e) => Some(e),
             Error::NmError(e) => Some(e),
+            Error::IoError(e) => Some(e),
         }
+    }
+}
+
+impl std::convert::From<io::Error> for Error {
+    fn from(err: io::Error) -> Error {
+        Error::IoError(err)
     }
 }
 
@@ -85,13 +94,17 @@ impl<'a> Serialize for Message<'a> {
             let filename = self.0.filename();
             mes.serialize_field("filename", &filename)?;
             let filenames: Vec<PathBuf> = self.0.filenames().collect();
-            mes.serialize_field("filnames", &filenames)?;
+            mes.serialize_field("filenames", &filenames)?;
             let tags: Vec<String> = self.0.tags().collect();
             mes.serialize_field("tags", &tags)?;
             let from = self.0.header("From").map_err(Error::custom)?.unwrap_or_else(|| Cow::from(""));
             mes.serialize_field("from", &from)?;
             let subject = self.0.header("Subject").map_err(Error::custom)?.unwrap_or_else(|| Cow::from(""));
             mes.serialize_field("subject", &subject)?;
+            let tid = self.0.thread_id();
+            mes.serialize_field("tid", &tid)?;
+            let keys : Vec<(String, String)> =  self.0.properties("session-key", true).collect();
+            mes.serialize_field("keys", &keys)?;
             mes.end()
     }
 }
@@ -127,6 +140,7 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut 
     let messages = query.search_messages()?;
     for message in messages {
         show_message(&message, writer)?;
+        write!(writer, "\n")?;
     }
     Ok(())
 }
@@ -138,6 +152,7 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W
     let threads = query.search_threads()?;
     for thread in threads {
         show_thread(&thread, writer)?;
+        write!(writer, "\n")?;
     }
     Ok(())
 }
@@ -156,6 +171,7 @@ fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str
             break;
         }
         show_message(&message, writer)?;
+        write!(writer, "\n")?;
     }
     Ok(())
 }
@@ -179,6 +195,7 @@ fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>
             continue;
         }
         show_message(&message, writer)?;
+        write!(writer, "\n")?;
     }
     Ok(())
 }
