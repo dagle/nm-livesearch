@@ -240,7 +240,6 @@ fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>
             show_message(&ser, writer)?;
             write!(writer, "\n")?;
         }
-        break; // there should only be one thread
     }
     Ok(())
 }
