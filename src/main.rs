@@ -150,29 +150,36 @@ fn sort_newest(a: &Message, b: &Message) -> Ordering {
 fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(str)?;
-    let threads = query.search_threads()?;
-    let mut matched_messages = Vec::new();
-    for thread in threads {
-        let mut index = 1;
-        let total = thread.total_messages();
-        for message in thread.messages() {
-            let matched = message.get_flag(notmuch::MessageFlag::Match);
-            if matched {
-                let ser = Message(message.clone(), index, total);
-                matched_messages.push(ser);
-            }
-            index=index+1
-        }
+    query.set_sort(sort);
+    let messages = query.search_messages()?;
+    for message in messages {
+        let ser = Message(message.clone(), 1, 1);
+        show_message(&ser, writer)?;
+        write!(writer,"\n")?;
     }
-    match sort {
-        Sort::OldestFirst => matched_messages.sort_by(sort_oldest),
-        Sort::NewestFirst => matched_messages.sort_by(sort_newest),
-        _ => panic!("This shouldn't happen")
-    }
-    for message in matched_messages.iter() {
-        show_message(&message, writer)?;
-        write!(writer, "\n")?;
-    }
+    // let threads = query.search_threads()?;
+    // let mut matched_messages = Vec::new();
+    // for thread in threads {
+    //     let mut index = 1;
+    //     let total = thread.total_messages();
+    //     for message in thread.messages() {
+    //         let matched = message.get_flag(notmuch::MessageFlag::Match);
+    //         if matched {
+    //             let ser = Message(message.clone(), index, total);
+    //             matched_messages.push(ser);
+    //         }
+    //         index=index+1
+    //     }
+    // }
+    // match sort {
+    //     Sort::OldestFirst => matched_messages.sort_by(sort_oldest),
+    //     Sort::NewestFirst => matched_messages.sort_by(sort_newest),
+    //     _ => panic!("This shouldn't happen")
+    // }
+    // for message in matched_messages.iter() {
+    //     show_message(&message, writer)?;
+    //     write!(writer, "\n")?;
+    // }
     Ok(())
 }
 
@@ -190,57 +197,93 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W
 
 fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
-    let mut query = format!("mid:{}", id);
+    let mut query = format!("thread:{{mid:{}}}", id);
     if let Some(str) = filter {
         query.push_str(" and ");
         query.push_str(str);
     }
-    let query = db.create_query(&query)?;
-    let threads = query.search_threads()?;
-    for thread in threads {
-        let mut index = 1;
-        let total = thread.total_messages();
-        for message in thread.messages() {
-            if message.id() == id {
-                break;
-            }
-            let ser = Message(message.clone(), index, total);
-            show_message(&ser, writer)?;
-            write!(writer, "\n")?;
-            index=index+1
+    let q = db.create_query(&query)?;
+    let messages = q.search_messages()?;
+    for message in messages {
+        if message.id() == id {
+            break;
         }
-        break; // there should only be one thread
+        let ser = Message(message.clone(), 1, 1);
+        show_message(&ser, writer)?;
+        println!("");
+        // writeln!(writer, "")?;
     }
+    // let mut query = format!("mid:{}", id);
+    // if let Some(str) = filter {
+    //     query.push_str(" and ");
+    //     query.push_str(str);
+    // }
+    // let query = db.create_query(&query)?;
+    // let threads = query.search_threads()?;
+    // for thread in threads {
+    //     let mut index = 1;
+    //     let total = thread.total_messages();
+    //     for message in thread.messages() {
+    //         if message.id() == id {
+    //             break;
+    //         }
+    //         let ser = Message(message.clone(), index, total);
+    //         show_message(&ser, writer)?;
+    //         write!(writer, "\n")?;
+    //         index=index+1
+    //     }
+    //     break; // there should only be one thread
+    // }
     Ok(())
 }
 
 fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
-    let mut query = format!("mid:{}", id);
+    let mut query = format!("thread:{{mid:{}}}", id);
     if let Some(str) = filter {
         query.push_str(" and ");
         query.push_str(str);
     }
-    let query = db.create_query(&query)?;
-    let threads = query.search_threads()?;
-    for thread in threads {
-        let mut index = 0;
-        let mut seen = false;
-        let total = thread.total_messages();
-        for message in thread.messages() {
-            index=index+1;
-            if message.id() == id {
-                seen = true;
-                continue;
-            }
-            if !seen {
-                continue;
-            }
-            let ser = Message(message.clone(), index, total);
-            show_message(&ser, writer)?;
-            write!(writer, "\n")?;
+    let q = db.create_query(&query)?;
+    let messages = q.search_messages()?;
+    let mut seen = false;
+    for message in messages {
+        if message.id() == id {
+            seen = true;
+            continue;
         }
+        if !seen {
+            continue;
+        }
+        let ser = Message(message.clone(), 1, 1);
+        show_message(&ser, writer)?;
+        println!("");
     }
+    // let mut query = format!("mid:{}", id);
+    // if let Some(str) = filter {
+    //     query.push_str(" and ");
+    //     query.push_str(str);
+    // }
+    // let query = db.create_query(&query)?;
+    // let threads = query.search_threads()?;
+    // for thread in threads {
+    //     let mut index = 0;
+    //     let mut seen = false;
+    //     let total = thread.total_messages();
+    //     for message in thread.messages() {
+    //         index=index+1;
+    //         if message.id() == id {
+    //             seen = true;
+    //             continue;
+    //         }
+    //         if !seen {
+    //             continue;
+    //         }
+    //         let ser = Message(message.clone(), index, total);
+    //         show_message(&ser, writer)?;
+    //         write!(writer, "\n")?;
+    //     }
+    // }
     Ok(())
 }
 
