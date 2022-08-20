@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cmp::Ordering, io};
+use std::{borrow::Cow, cmp::Ordering, io::{self, StdoutLock, Write}};
 use std::{error, fmt, result};
 extern crate home;
 extern crate notmuch;
@@ -56,6 +56,100 @@ impl std::convert::From<serde_json::Error> for Error {
     fn from(err: serde_json::Error) -> Error {
         Error::SerdeErr(err)
     }
+}
+
+// fn get_message(message: &notmuch::Message, tid: &str, level: i32, prestring: String, num: i32, i: i32, total: i32) -> TreeMessage {
+//     TreeMessage {
+//         id: message.id().to_string(),
+//         tid: tid.to_string(),
+//         filename: message.filename().to_str().unwrap_or("").to_owned(),
+//         level,
+//         pre: prestring,
+//         index: i,
+//         total,
+//         date: message.date(),
+//         tags: message.tags().collect(),
+//         sub: message.header("Subject").unwrap().unwrap().to_string(),
+//         from: message.header("From").unwrap().unwrap().to_string(),
+//         matched: false,
+//         excluded: false,
+//     }
+// }
+	// local sub = nm.message_get_header(message, "Subject")
+	// local tags = u.collect(nm.message_get_tags(message))
+	// local from = nm.message_get_header(message, "From")
+	// local date = nm.message_get_date(message)
+	// local matched = nm.message_get_flag(message, 0)
+	// local excluded = nm.message_get_flag(message, 1)
+// local function get_message(message, level, prestring, i, total)
+
+// struct Tree<'a> {
+//     message: &'a notmuch::Message,
+//     level: i32,
+//     prestr: &'a str,
+//     index: i32,
+//     total: i32
+// }
+
+fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, lock: &mut StdoutLock) -> Result<i32> {
+    let mut j = 1;
+    let length = messages.len();
+    let mut n = num;
+    for message in messages {
+        let mut newstring: String = prestring.clone();
+        if n == 0 {
+        } else if j == length {
+            newstring.push_str("└─")
+        } else {
+            newstring.push_str("├─")
+        }
+
+        let replies = message.replies();
+        let replies_vec: Vec<notmuch::Message> = replies.collect();
+
+        if replies_vec.len()  > 0 {
+            newstring.push_str("┬")
+        } else {
+            newstring.push_str("─")
+        }
+
+        let sub = message.header("Subject").unwrap().unwrap().to_string();
+        let tags: Vec<String> = message.tags().collect();
+        let from = message.header("From").unwrap().unwrap().to_string();
+        let date = message.date();
+
+        if level > 0 && n > 0 {
+            lock.write_fmt(format_args!("{} [{:02}/{:02}] {}| {}▶ ({})\n", date, n+1, total, from, newstring, tags.join(",")))?;
+        } else {
+            lock.write_fmt(format_args!("{} [{:02}/{:02}] {}| {} ({})\n", date, n+1, total, from, sub, tags.join(",")))?;
+        }
+
+        let mut newstring: String = prestring.clone();
+        if n == 0 {
+        } else if length > j {
+            newstring.push_str("│ ")
+        } else {
+            newstring.push_str("  ")
+        }
+        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, lock)?;
+        j += 1;
+    }
+    Ok(n)
+}
+
+fn show_thread_tree(db: &notmuch::Database, sort: Sort, search: &str) -> Result<()> {
+    let query = db.create_query(search).unwrap();
+    query.set_sort(sort);
+    let mut stdout = io::stdout().lock();
+    let threads = query.search_threads().unwrap();
+    for thread in threads {
+        let total = thread.total_messages();
+        let messages = thread.toplevel_messages();
+        // let mut vec: Vec<TreeMessage> = Vec::new();
+        let mvec = messages.collect();
+        show_message_tree(&mvec, 0, "".to_string(), 0, total, &mut stdout)?;
+    }
+    Ok(())
 }
 
 struct Thread<'a>(&'a notmuch::Thread);
@@ -325,6 +419,9 @@ enum Commands {
         id: String,
         search: Vec<String>,
     },
+    ShowTree {
+        search: Vec<String>,
+    },
 }
 
 
@@ -338,6 +435,7 @@ fn main() -> Result<()>{
     match &args.command {
         Commands::Message{search} => show_messages(&db, sort, &search.join(" "), &mut writer)?,
         Commands::Thread{search} => show_threads(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowTree{search} => show_thread_tree(&db, sort, &search.join(" "))?,
         Commands::MessageBefore{id, search} => {
             if search.is_empty() {
                 show_before_message(&db, id, &None, &mut writer)?;
