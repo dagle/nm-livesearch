@@ -6,6 +6,10 @@ use notmuch::Sort;
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 use std::fmt::Debug;
+extern crate chrono;
+
+use chrono::{format::{DelayedFormat, StrftimeItems}, prelude::*};
+use std::collections::BinaryHeap;
 
 use std::path::PathBuf;
 
@@ -58,42 +62,157 @@ impl std::convert::From<serde_json::Error> for Error {
     }
 }
 
-// fn get_message(message: &notmuch::Message, tid: &str, level: i32, prestring: String, num: i32, i: i32, total: i32) -> TreeMessage {
-//     TreeMessage {
-//         id: message.id().to_string(),
-//         tid: tid.to_string(),
-//         filename: message.filename().to_str().unwrap_or("").to_owned(),
-//         level,
-//         pre: prestring,
-//         index: i,
-//         total,
-//         date: message.date(),
-//         tags: message.tags().collect(),
-//         sub: message.header("Subject").unwrap().unwrap().to_string(),
-//         from: message.header("From").unwrap().unwrap().to_string(),
-//         matched: false,
-//         excluded: false,
-//     }
-// }
-	// local sub = nm.message_get_header(message, "Subject")
-	// local tags = u.collect(nm.message_get_tags(message))
-	// local from = nm.message_get_header(message, "From")
-	// local date = nm.message_get_date(message)
-	// local matched = nm.message_get_flag(message, 0)
-	// local excluded = nm.message_get_flag(message, 1)
-// local function get_message(message, level, prestring, i, total)
+fn show_time<'a>(date: i64) -> DelayedFormat<StrftimeItems<'a>> {
+    let naive = NaiveDateTime::from_timestamp(date, 0);
+    let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+    datetime.format("%Y-%m-%d")
+}
 
-// struct Tree<'a> {
-//     message: &'a notmuch::Message,
-//     level: i32,
-//     prestr: &'a str,
-//     index: i32,
-//     total: i32
-// }
+fn fix_subject(sub: &str) -> String {
+    sub.chars()
+        .map(|x| match x { 
+            '\r' => ' ', 
+            '\n' => ' ',
+            _ => x
+        }).collect()
+}
 
-// fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()> 
-fn show_message_tree<W>(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, writer: &mut W) -> Result<i32>
+fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
+    let query = db.create_query(&search)?;
+    query.set_sort(sort);
+    let threads = query.search_threads()?;
+    for thread in threads {
+        let id = thread.id();
+        let subject = thread.subject();
+        let subfixed = fix_subject(&subject);
+        let authors = thread.authors();
+        let total = thread.total_messages();
+        let matched = thread.matched_messages();
+        let date = thread.newest_date();
+        let newdate = show_time(date);
+        let tags: Vec<String> = thread.tags().collect();
+        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, matched, total, authors.join(" "), subfixed, tags.join(","));
+        let tuple = (id, str);
+        serde_json::to_writer(&mut *writer, &tuple)?;
+        write!(writer,"\n")?;
+    }
+    Ok(())
+}
+
+struct OrderMessage(i64, Sort, (String, String, bool));
+
+impl PartialEq for OrderMessage {
+    fn eq(&self, other: &Self) -> bool {
+        self.0.eq(&other.0)
+    }
+}
+impl Eq for OrderMessage {
+    fn assert_receiver_is_total_eq(&self) {}
+}
+
+impl PartialOrd for OrderMessage {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        if self.1 == Sort::OldestFirst {
+            return other.0.partial_cmp(&self.0)
+        }
+        self.0.partial_cmp(&other.0)
+    }
+}
+
+impl Ord for OrderMessage {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        if self.1 == Sort::OldestFirst {
+            return other.0.cmp(&self.0)
+        }
+        self.0.cmp(&other.0)
+    }
+}
+
+fn flush_messages<W>(heap: &mut BinaryHeap<OrderMessage>, sort: Sort, reference: i64, writer: &mut W) -> Result<()>
+    where W: io::Write {
+    loop {
+        match heap.peek() {
+            Some(value) => {
+                if !compare_diff(value.0, reference, sort) {
+                    let top = heap.pop().unwrap();
+                    serde_json::to_writer(&mut *writer, &top.2)?;
+                    write!(writer,"\n")?;
+                } else {
+                    break;
+                }
+            }
+            None => {
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compare_time(thread: &notmuch::Thread, sort: Sort) -> i64 {
+    match sort {
+        Sort::OldestFirst => {
+            thread.oldest_date()
+        }
+        _ => {
+            thread.newest_date()
+        }
+    }
+}
+
+fn compare_diff(current: i64, reference: i64, sort: Sort) -> bool {
+    match sort {
+        Sort::OldestFirst => {
+            current < reference 
+        }
+        _ => {
+            current > reference 
+        }
+    }
+}
+
+fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+    where W: io::Write {
+    let query = db.create_query(&search)?;
+    query.set_sort(sort);
+    let threads = query.search_threads()?;
+    let mut heap = BinaryHeap::new();
+    for thread in threads {
+        let messages = thread.messages();
+        let reference = compare_time(&thread, sort);
+        let total = thread.total_messages();
+        flush_messages(&mut heap, sort, reference, writer)?;
+        let mut counter = 0;
+        for message in messages {
+            counter = counter + 1;
+            let matched = message.get_flag(notmuch::MessageFlag::Match);
+            if !matched {
+                continue;
+            }
+            let id = message.id();
+            let subject = message.header("Subject")?.unwrap_or_default();
+            let subfixed = fix_subject(&subject);
+            let tags: Vec<String> = message.tags().collect();
+            let from = message.header("From")?.unwrap_or_default();
+            let date = message.date();
+            let newdate = show_time(date);
+            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(","));
+            let tuple = (id.to_string(), str, matched);
+            if compare_diff(date, reference, sort) {
+                let om = OrderMessage(date, sort, tuple);
+                heap.push(om)
+            } else {
+                serde_json::to_writer(&mut *writer, &tuple)?;
+                write!(writer,"\n")?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<(String, String, bool)>) -> Result<i32>
+    {
     let mut j = 1;
     let length = messages.len();
     let mut n = num;
@@ -116,23 +235,22 @@ fn show_message_tree<W>(messages: &Vec<notmuch::Message>, level: i32, prestring:
         }
 
         let tags: Vec<String> = message.tags().collect();
-        let from = message.header("From").unwrap().unwrap_or_default();
-        let date = message.date();
-        let sub = message.header("Subject").unwrap().unwrap_or_default();
+        let from = message.header("From")?.unwrap_or_default();
+        let subject = message.header("Subject")?.unwrap_or_default();
+        let subfixed = fix_subject(&subject);
         let matched = message.get_flag(notmuch::MessageFlag::Match);
         let id = message.id();
+        let date = message.date();
+        let newdate = show_time(date);
 
         if level > 0 && n > 0 {
-            // serde_json::to_writer(writer, message)?;
-            let str = format!("{} [{:02}/{:02}] {}| {}▶ ({})\n", date, n+1, total, from, newstring, tags.join(","));
-            let tuple = (id, str, matched);
-            serde_json::to_writer(&mut *writer, &tuple)?;
-            write!(writer,"\n")?;
+            let str = format!("{} [{:02}/{:02}] {:25}│ {}▶ ({})", newdate, n+1, total, from, newstring, tags.join(","));
+            let tuple = (id.to_string(), str, matched);
+            vec.push(tuple)
         } else {
-            let str = format!("{} [{:02}/{:02}] {}| {} ({})\n", date, n+1, total, from, sub, tags.join(","));
-            let tuple = (id, str, matched);
-            serde_json::to_writer(&mut *writer, &tuple)?;
-            write!(writer,"\n")?;
+            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, n+1, total, from, subfixed, tags.join(","));
+            let tuple = (id.to_string(), str, matched);
+            vec.push(tuple)
         }
 
         let mut newstring: String = prestring.clone();
@@ -142,25 +260,25 @@ fn show_message_tree<W>(messages: &Vec<notmuch::Message>, level: i32, prestring:
         } else {
             newstring.push_str("  ")
         }
-        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, writer)?;
+        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, vec)?;
         j += 1;
     }
     Ok(n)
 }
 
-// fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
-//     where W: io::Write {
 fn show_thread_tree<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
-    let query = db.create_query(search).unwrap();
+    let query = db.create_query(search)?;
     query.set_sort(sort);
-    let threads = query.search_threads().unwrap();
+    let threads = query.search_threads()?;
     for thread in threads {
         let total = thread.total_messages();
         let messages = thread.toplevel_messages();
-        // let mut vec: Vec<TreeMessage> = Vec::new();
+        let mut vec = Vec::new();
         let mvec = messages.collect();
-        show_message_tree(&mvec, 0, "".to_string(), 0, total, writer)?;
+        show_message_tree(&mvec, 0, "".to_string(), 0, total, &mut vec)?;
+        serde_json::to_writer(&mut *writer, &vec)?;
+        write!(writer,"\n")?;
     }
     Ok(())
 }
@@ -188,6 +306,7 @@ impl<'a> Serialize for Thread<'a> {
 
 struct Message(notmuch::Message, i32, i32);
 
+// TODO currently we are just using Subject and id
 impl Serialize for Message {
     fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
     where
@@ -245,18 +364,7 @@ fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()>
     Ok(())
 }
 
-// fn sort_oldest(a: &Message, b: &Message) -> Ordering {
-//     let adate = a.0.date();
-//     let bdate = b.0.date();
-//     adate.cmp(&bdate)
-// }
-// fn sort_newest(a: &Message, b: &Message) -> Ordering {
-//     let adate = a.0.date();
-//     let bdate = b.0.date();
-//     bdate.cmp(&adate)
-// }
-
-fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
+fn messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(str)?;
     query.set_sort(sort);
@@ -268,7 +376,7 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut 
     Ok(())
 }
 
-fn show_threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
+fn threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(str)?;
     query.set_sort(sort);
@@ -279,7 +387,7 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W
     Ok(())
 }
 
-fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
+fn show_before_message<W>(db: &notmuch::Database, sort: Sort, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
     let mut query = format!("thread:{{mid:{}}}", id);
     if let Some(str) = filter {
@@ -287,6 +395,7 @@ fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str
         query.push_str(str);
     }
     let q = db.create_query(&query)?;
+    q.set_sort(sort);
     let messages = q.search_messages()?;
     for message in messages {
         if message.id() == id {
@@ -294,33 +403,11 @@ fn show_before_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str
         }
         let ser = Message(message.clone(), 1, 1);
         show_message(&ser, writer)?;
-        // writeln!(writer, "")?;
     }
-    // let mut query = format!("mid:{}", id);
-    // if let Some(str) = filter {
-    //     query.push_str(" and ");
-    //     query.push_str(str);
-    // }
-    // let query = db.create_query(&query)?;
-    // let threads = query.search_threads()?;
-    // for thread in threads {
-    //     let mut index = 1;
-    //     let total = thread.total_messages();
-    //     for message in thread.messages() {
-    //         if message.id() == id {
-    //             break;
-    //         }
-    //         let ser = Message(message.clone(), index, total);
-    //         show_message(&ser, writer)?;
-    //         write!(writer, "\n")?;
-    //         index=index+1
-    //     }
-    //     break; // there should only be one thread
-    // }
     Ok(())
 }
 
-fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
+fn show_after_message<W>(db: &notmuch::Database, sort: Sort, id: &str, filter: &Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
     let mut query = format!("thread:{{mid:{}}}", id);
     if let Some(str) = filter {
@@ -328,6 +415,7 @@ fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>
         query.push_str(str);
     }
     let q = db.create_query(&query)?;
+    q.set_sort(sort);
     let messages = q.search_messages()?;
     let mut seen = false;
     for message in messages {
@@ -341,31 +429,6 @@ fn show_after_message<W>(db: &notmuch::Database, id: &str, filter: &Option<&str>
         let ser = Message(message.clone(), 1, 1);
         show_message(&ser, writer)?;
     }
-    // let mut query = format!("mid:{}", id);
-    // if let Some(str) = filter {
-    //     query.push_str(" and ");
-    //     query.push_str(str);
-    // }
-    // let query = db.create_query(&query)?;
-    // let threads = query.search_threads()?;
-    // for thread in threads {
-    //     let mut index = 0;
-    //     let mut seen = false;
-    //     let total = thread.total_messages();
-    //     for message in thread.messages() {
-    //         index=index+1;
-    //         if message.id() == id {
-    //             seen = true;
-    //             continue;
-    //         }
-    //         if !seen {
-    //             continue;
-    //         }
-    //         let ser = Message(message.clone(), index, total);
-    //         show_message(&ser, writer)?;
-    //         write!(writer, "\n")?;
-    //     }
-    // }
     Ok(())
 }
 
@@ -391,25 +454,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    Message {
+    Messages {
         #[clap(required = true)]
         search: Vec<String>,
     },
-    Thread {
+    Threads {
         #[clap(required = true)]
         search: Vec<String>,
     },
-    MessageBefore {
+    MessagesBefore {
         id: String,
         search: Vec<String>,
     },
-    MessageAfter {
+    MessagesAfter {
         id: String,
         search: Vec<String>,
     },
     ShowTree {
         search: Vec<String>,
     },
+    ShowMessage {
+        search: Vec<String>,
+    },
+    ShowThread {
+        search: Vec<String>,
+    }
 }
 
 
@@ -421,24 +490,26 @@ fn main() -> Result<()>{
     let mut writer = std::io::BufWriter::new(io::stdout().lock());
 
     match &args.command {
-        Commands::Message{search} => show_messages(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::Thread{search} => show_threads(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::Messages{search} => messages(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::Threads{search} => threads(&db, sort, &search.join(" "), &mut writer)?,
         Commands::ShowTree{search} => show_thread_tree(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::MessageBefore{id, search} => {
+        Commands::ShowMessage{search} => show_messages(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowThread{search} => show_threads(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::MessagesBefore{id, search} => {
             if search.is_empty() {
-                show_before_message(&db, id, &None, &mut writer)?;
+                show_before_message(&db, sort, id, &None, &mut writer)?;
                 return Ok(())
             }
             let args = search.join(" ");
-            show_before_message(&db, id, &Some(&args), &mut writer)?
+            show_before_message(&db, sort, id, &Some(&args), &mut writer)?
         },
-        Commands::MessageAfter{id, search} => {
+        Commands::MessagesAfter{id, search} => {
             if search.is_empty() {
-                show_after_message(&db, id, &None, &mut writer)?;
+                show_after_message(&db, sort, id, &None, &mut writer)?;
                 return Ok(())
             }
             let args = search.join(" ");
-            show_after_message(&db, id, &Some(&args), &mut writer)?
+            show_after_message(&db, sort, id, &Some(&args), &mut writer)?
         },
     }
     Ok(())
