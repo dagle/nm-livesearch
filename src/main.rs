@@ -93,14 +93,14 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mu
         let newdate = show_time(date);
         let tags: Vec<String> = thread.tags().collect();
         let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, matched, total, authors.join(" "), subfixed, tags.join(","));
-        let tuple = (id, str);
+        let tuple = Show { id: id.to_string(), entry: str, matched: true };
         serde_json::to_writer(&mut *writer, &tuple)?;
         write!(writer,"\n")?;
     }
     Ok(())
 }
 
-struct OrderMessage(i64, Sort, (String, String, bool));
+struct OrderMessage(i64, Sort, Show);
 
 impl PartialEq for OrderMessage {
     fn eq(&self, other: &Self) -> bool {
@@ -127,6 +127,13 @@ impl Ord for OrderMessage {
         }
         self.0.cmp(&other.0)
     }
+}
+
+#[derive(Serialize, Debug)]
+struct Show {
+    id: String,
+    entry: String,
+    matched: bool,
 }
 
 fn flush_messages<W>(heap: &mut BinaryHeap<OrderMessage>, sort: Sort, reference: i64, writer: &mut W) -> Result<()>
@@ -198,12 +205,12 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &m
             let date = message.date();
             let newdate = show_time(date);
             let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(","));
-            let tuple = (id.to_string(), str, matched);
+            let show = Show { id: id.to_string(), entry: str, matched};
             if compare_diff(date, reference, sort) {
-                let om = OrderMessage(date, sort, tuple);
+                let om = OrderMessage(date, sort, show);
                 heap.push(om)
             } else {
-                serde_json::to_writer(&mut *writer, &tuple)?;
+                serde_json::to_writer(&mut *writer, &show)?;
                 write!(writer,"\n")?;
             }
         }
@@ -211,7 +218,7 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &m
     Ok(())
 }
 
-fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<(String, String, bool)>) -> Result<i32>
+fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
     {
     let mut j = 1;
     let length = messages.len();
@@ -245,12 +252,12 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: St
 
         if level > 0 && n > 0 {
             let str = format!("{} [{:02}/{:02}] {:25}│ {}▶ ({})", newdate, n+1, total, from, newstring, tags.join(","));
-            let tuple = (id.to_string(), str, matched);
-            vec.push(tuple)
+            let show = Show { id: id.to_string(), entry: str, matched };
+            vec.push(show)
         } else {
             let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, n+1, total, from, subfixed, tags.join(","));
-            let tuple = (id.to_string(), str, matched);
-            vec.push(tuple)
+            let show = Show { id: id.to_string(), entry: str, matched };
+            vec.push(show)
         }
 
         let mut newstring: String = prestring.clone();
