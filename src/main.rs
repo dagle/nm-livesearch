@@ -92,7 +92,7 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mu
         let date = thread.newest_date();
         let newdate = show_time(date);
         let tags: Vec<String> = thread.tags().collect();
-        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, matched, total, authors.join(" "), subfixed, tags.join(","));
+        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, matched, total, authors.join(" "), subfixed, tags.join(", "));
         let tuple = Show { id: id.to_string(), entry: str, matched: true };
         serde_json::to_writer(&mut *writer, &tuple)?;
         write!(writer,"\n")?;
@@ -191,7 +191,7 @@ where W: io::Write {
         let from = message.header("From")?.unwrap_or_default();
         let date = message.date();
         let newdate = show_time(date);
-        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(","));
+        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(", "));
         let show = Show { id: id.to_string(), entry: str, matched};
         if compare_diff(date, reference, sort) {
             let om = OrderMessage(date, sort, show);
@@ -255,15 +255,15 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: St
         let subfixed = fix_subject(&subject);
         let matched = message.get_flag(notmuch::MessageFlag::Match);
         let id = message.id();
-        let date = message.date();
-        let newdate = show_time(date);
+        let unix_date = message.date();
+        let date = show_time(unix_date);
 
         if level > 0 && n > 0 {
-            let str = format!("{} [{:02}/{:02}] {:25}│ {}▶ ({})", newdate, n+1, total, from, newstring, tags.join(","));
+            let str = format!("{} [{:02}/{:02}] {:25}│ {}▶ ({})", date, n+1, total, from, newstring, tags.join(", "));
             let show = Show { id: id.to_string(), entry: str, matched };
             vec.push(show)
         } else {
-            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, n+1, total, from, subfixed, tags.join(","));
+            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", date, n+1, total, from, subfixed, tags.join(", "));
             let show = Show { id: id.to_string(), entry: str, matched };
             vec.push(show)
         }
