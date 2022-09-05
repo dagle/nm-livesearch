@@ -7,6 +7,7 @@ use serde::Serialize;
 use serde::ser::SerializeStruct;
 use std::fmt::Debug;
 extern crate chrono;
+use regex::*;
 
 use chrono::{format::{DelayedFormat, StrftimeItems}, prelude::*};
 use std::collections::BinaryHeap;
@@ -62,6 +63,29 @@ impl std::convert::From<serde_json::Error> for Error {
     }
 }
 
+struct Templ<'a> {
+    regex: Regex,
+    templ_message: &'a str,
+    templ_respons: Option<&'a str>,
+}
+
+fn template<'a>(regex: &Regex, template: &'a str, date: &DelayedFormat<StrftimeItems<'a>>, num: i32, total: i32, from: &Cow<str>, subject: &String, tags: String) -> String {
+        let template = regex.replace_all(template, |caps: &Captures| {
+            let str = caps.get(1).unwrap().as_str().trim();
+            match str {
+                "date" => format!("{}",date),
+                "index" => format!("{:02}", num),
+                "total" => format!("{:02}", total),
+                "from" => format!("{:25}", from),
+                "subject" => format!("{}", subject),
+                "tags" => format!("{}", tags),
+                // TODO better error messages
+                _ => panic!("Not supported")
+            }
+        });
+        template.to_string()
+}
+
 fn show_time<'a>(date: i64) -> DelayedFormat<StrftimeItems<'a>> {
     let naive = NaiveDateTime::from_timestamp(date, 0);
     let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
@@ -80,6 +104,12 @@ fn fix_subject(sub: &str) -> String {
 fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
+    let regex = Regex::new(r"\{(.*?)\}").unwrap();
+    let templ = Templ {
+        regex,
+        templ_message: "{date} [{index}/{total}] {from}│ {subject} ({tags})",
+        templ_respons: None,
+    };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     for thread in threads {
@@ -89,10 +119,11 @@ fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mu
         let authors = thread.authors();
         let total = thread.total_messages();
         let matched = thread.matched_messages();
-        let date = thread.newest_date();
-        let newdate = show_time(date);
+        let unix_date = thread.newest_date();
+        let date = show_time(unix_date);
+
         let tags: Vec<String> = thread.tags().collect();
-        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, matched, total, authors.join(" "), subfixed, tags.join(", "));
+        let str = template(&templ.regex, &templ.templ_message, &date, matched, total, &Cow::from(authors.join(" ")), &subfixed, tags.join(", "));
         let tuple = Show { id: id.to_string(), entry: str, matched: true };
         serde_json::to_writer(&mut *writer, &tuple)?;
         write!(writer,"\n")?;
@@ -179,7 +210,7 @@ fn compare_diff(current: i64, reference: i64, sort: Sort) -> bool {
     }
 }
 
-fn show_messages_helper<W>(message: &notmuch::Message, sort: Sort, reference: i64, num: i32, total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage>) -> Result<i32>
+fn show_messages_helper<W>(message: &notmuch::Message, templ: &Templ, sort: Sort, reference: i64, num: i32, total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage>) -> Result<i32>
 where W: io::Write {
     let mut counter = num + 1;
     let matched = message.get_flag(notmuch::MessageFlag::Match);
@@ -189,12 +220,12 @@ where W: io::Write {
         let subfixed = fix_subject(&subject);
         let tags: Vec<String> = message.tags().collect();
         let from = message.header("From")?.unwrap_or_default();
-        let date = message.date();
-        let newdate = show_time(date);
-        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(", "));
+        let unix_date = message.date();
+        let date = show_time(unix_date);
+        let str = template(&templ.regex, &templ.templ_message, &date, counter, total, &from, &subfixed, tags.join(", "));
         let show = Show { id: id.to_string(), entry: str, matched};
-        if compare_diff(date, reference, sort) {
-            let om = OrderMessage(date, sort, show);
+        if compare_diff(unix_date, reference, sort) {
+            let om = OrderMessage(unix_date, sort, show);
             heap.push(om)
         } else {
             serde_json::to_writer(&mut *writer, &show)?;
@@ -202,7 +233,7 @@ where W: io::Write {
         }
     }
     for message in message.replies() {
-        counter = show_messages_helper(&message, sort, reference, counter, total, writer, heap)?;
+        counter = show_messages_helper(&message, &templ, sort, reference, counter, total, writer, heap)?;
     }
     Ok(counter)
 }
@@ -210,6 +241,12 @@ where W: io::Write {
 fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
+    let regex = Regex::new(r"\{(.*?)\}").unwrap();
+    let templ = Templ {
+        regex,
+        templ_message: "{date} [{index}/{total}] {from}│ {subject} ({tags})",
+        templ_respons: None,
+    };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     let mut heap = BinaryHeap::new();
@@ -220,13 +257,13 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &m
         let top = thread.toplevel_messages();
         let mut counter = 0;
         for message in top {
-            counter = show_messages_helper(&message, sort, reference, counter, total, writer, &mut heap)?;
+            counter = show_messages_helper(&message, &templ, sort, reference, counter, total, writer, &mut heap)?;
         }
     }
     Ok(())
 }
 
-fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
+fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
     {
     let mut j = 1;
     let length = messages.len();
@@ -259,11 +296,11 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: St
         let date = show_time(unix_date);
 
         if level > 0 && n > 0 {
-            let str = format!("{} [{:02}/{:02}] {:25}│ {}▶ ({})", date, n+1, total, from, newstring, tags.join(", "));
+            let str = template(&templ.regex, &templ.templ_respons.unwrap(), &date, n+1, total, &from, &newstring, tags.join(", "));
             let show = Show { id: id.to_string(), entry: str, matched };
             vec.push(show)
         } else {
-            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", date, n+1, total, from, subfixed, tags.join(", "));
+            let str = template(&templ.regex, &templ.templ_message, &date, n+1, total, &from, &subfixed, tags.join(", "));
             let show = Show { id: id.to_string(), entry: str, matched };
             vec.push(show)
         }
@@ -275,7 +312,7 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: St
         } else {
             newstring.push_str("  ")
         }
-        n = show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, vec)?;
+        n = show_message_tree(&replies_vec, &templ, level + 1, newstring, n + 1, total, vec)?;
         j += 1;
     }
     Ok(n)
@@ -284,6 +321,12 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, level: i32, prestring: St
 fn show_thread_tree<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(search)?;
+    let regex = Regex::new(r"\{(.*?)\}").unwrap();
+    let templ = Templ {
+        regex,
+        templ_message: "{date} [{index}/{total}] {from}│ {subject} ({tags})",
+        templ_respons: Some("{date} [{index}/{total}] {from}│ {subject}▶ ({tags})"),
+    };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     for thread in threads {
@@ -291,7 +334,7 @@ fn show_thread_tree<W>(db: &notmuch::Database, sort: Sort, search: &str, writer:
         let messages = thread.toplevel_messages();
         let mut vec = Vec::new();
         let mvec = messages.collect();
-        show_message_tree(&mvec, 0, "".to_string(), 0, total, &mut vec)?;
+        show_message_tree(&mvec, &templ, 0, "".to_string(), 0, total, &mut vec)?;
         serde_json::to_writer(&mut *writer, &vec)?;
         write!(writer,"\n")?;
     }

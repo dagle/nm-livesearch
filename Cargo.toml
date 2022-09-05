@@ -14,3 +14,4 @@ serde = { version = "1.0", features = ["derive"] }
 xdg = "*"
 home = "*"
 chrono = "0.4.22"
+regex = "1.6.0"
