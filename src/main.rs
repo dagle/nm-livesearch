@@ -179,6 +179,34 @@ fn compare_diff(current: i64, reference: i64, sort: Sort) -> bool {
     }
 }
 
+fn show_messages_helper<W>(message: &notmuch::Message, sort: Sort, reference: i64, num: i32, total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage>) -> Result<i32>
+where W: io::Write {
+    let mut counter = num + 1;
+    let matched = message.get_flag(notmuch::MessageFlag::Match);
+    if matched {
+        let id = message.id();
+        let subject = message.header("Subject")?.unwrap_or_default();
+        let subfixed = fix_subject(&subject);
+        let tags: Vec<String> = message.tags().collect();
+        let from = message.header("From")?.unwrap_or_default();
+        let date = message.date();
+        let newdate = show_time(date);
+        let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(","));
+        let show = Show { id: id.to_string(), entry: str, matched};
+        if compare_diff(date, reference, sort) {
+            let om = OrderMessage(date, sort, show);
+            heap.push(om)
+        } else {
+            serde_json::to_writer(&mut *writer, &show)?;
+            write!(writer,"\n")?;
+        }
+    }
+    for message in message.replies() {
+        counter = show_messages_helper(&message, sort, reference, counter, total, writer, heap)?;
+    }
+    Ok(counter)
+}
+
 fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
@@ -186,33 +214,13 @@ fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &m
     let threads = query.search_threads()?;
     let mut heap = BinaryHeap::new();
     for thread in threads {
-        let messages = thread.messages();
         let reference = compare_time(&thread, sort);
         let total = thread.total_messages();
         flush_messages(&mut heap, sort, reference, writer)?;
+        let top = thread.toplevel_messages();
         let mut counter = 0;
-        for message in messages {
-            counter = counter + 1;
-            let matched = message.get_flag(notmuch::MessageFlag::Match);
-            if !matched {
-                continue;
-            }
-            let id = message.id();
-            let subject = message.header("Subject")?.unwrap_or_default();
-            let subfixed = fix_subject(&subject);
-            let tags: Vec<String> = message.tags().collect();
-            let from = message.header("From")?.unwrap_or_default();
-            let date = message.date();
-            let newdate = show_time(date);
-            let str = format!("{} [{:02}/{:02}] {:25}│ {} ({})", newdate, counter, total, from, subfixed, tags.join(","));
-            let show = Show { id: id.to_string(), entry: str, matched};
-            if compare_diff(date, reference, sort) {
-                let om = OrderMessage(date, sort, show);
-                heap.push(om)
-            } else {
-                serde_json::to_writer(&mut *writer, &show)?;
-                write!(writer,"\n")?;
-            }
+        for message in top {
+            counter = show_messages_helper(&message, sort, reference, counter, total, writer, &mut heap)?;
         }
     }
     Ok(())
