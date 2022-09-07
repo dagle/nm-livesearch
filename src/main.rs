@@ -18,9 +18,6 @@ use clap::{Parser, Subcommand};
 
 type Result<T> = result::Result<T, Error>;
 
-// syntax 
-static templ_message: &str = "{date} [{index}/{total}] {from:25}│ {subject} ({tags})";
-static templ_respons: Option<&str> = Some("{date} [{index}/{total}] {from:25}│ {subject}▶ ({tags})");
 static REGEXSTR: &str = r"\{([^:]*?):?(\d+)?\}";
 
 #[derive(Debug)]
@@ -68,76 +65,168 @@ impl std::convert::From<serde_json::Error> for Error {
     }
 }
 
-// use &'a str?
 #[derive(Deserialize, Debug)]
-struct Match_values {
+struct Highlight {
     id: Option<String>,
-    date: Option<String>,
+    date: Option<i64>,
     num: Option<i32>,
     total: Option<i32>,
     from: Option<String>,
     subject: Option<String>,
     tags: Option<Vec<String>>,
+    matched: Option<bool>,
+    excluded: Option<bool>,
 }
 
-// #[macro_export]
-macro_rules! match_message {
-    ( $( $x:expr ),* ) => {
+// this make updating easier, if we change semantics
+macro_rules! match_ret {
+    ( $x:expr ) => {
         {
-            
-            // let mut temp_vec = Vec::new();
-            // $(
-            //     temp_vec.push($x);
-            // )*
-            // temp_vec
+           if !$x {
+               return Ok(false)
+           }
         }
     };
 }
 
-// change this to message?
-fn match_message<'a>(mv: Match_values, id: &String, date: &DelayedFormat<StrftimeItems<'a>>, num:i32, total: i32, from: &Cow<str>, subject: &String, tags: &Vec<String>) -> bool {
-    let mut matched = true;
-    if let Some(mid) = mv.id {
-        matched = matched && *id == mid
+macro_rules! check_none {
+    ( $( $x:expr ),* ) => {
+        {
+            $(
+                if let Some(_) = $x {
+                    return false;
+                }  
+            )*
+            true
+        }
     }
-    // if let Some(mdate) = mv.date {
-    //     matched = matched && date. == mdate
-    // }
+}
+
+fn same_day(date: i64, mdate: i64) -> bool {
+    let mnaive = NaiveDateTime::from_timestamp(mdate, 0);
+    let mdatetime: DateTime<Utc> = DateTime::from_utc(mnaive, Utc);
+    let naive = NaiveDateTime::from_timestamp(date, 0);
+    let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
+    // idk, maybe we can do this easier
+    datetime.year() == mdatetime.year() && datetime.month() == mdatetime.month() && datetime.day() == mdatetime.day()
+}
+
+fn empty(mv: &Highlight) -> bool {
+    check_none!(mv.id, mv.date, mv.num, mv.total, mv.from, mv.subject, mv.tags, mv.matched, mv.excluded)
+}
+
+// TODO if all fields are None, then return false
+fn highlight_message<'a>(mv: &Option<Highlight>, message: &notmuch::Message, num: i32, total: i32) -> Result<bool> {
+    if let None = mv {
+        return Ok(false);
+    }
+
+    let mv = mv.unwrap();
+
+    if let Some(ref mid) = mv.id {
+        let id = message.id();
+        match_ret!(mid == id.as_ref());
+    }
+    if let Some(mdate) = mv.date {
+        let unix_date = message.date();
+        // maybe we can do something more interesting than this
+        match_ret!(same_day(unix_date, mdate));
+
+    }
     if let Some(mnum) = mv.num {
-        matched = matched && num == mnum
+        match_ret!(mnum == num);
     }
-    matched
+    if let Some(mtotal) = mv.total {
+        match_ret!(mtotal == total);
+    }
+    if let Some(ref mfrom) = mv.from {
+        let from = message.header("From")?.unwrap_or_default();
+        match_ret!(mfrom == from.as_ref());
+    }
+    if let Some(ref msubject) = mv.subject {
+        let subject = message.header("Subject")?.unwrap_or_default();
+        match_ret!(msubject == subject.as_ref());
+    }
+    if let Some(ref mtags) = mv.tags {
+        let tags: Vec<String> = message.tags().collect();
+        for mtag in mtags {
+            match_ret!(tags.contains(mtag));
+        }
+    }
+    if let Some(mmatched) = mv.matched {
+        let nmatched = message.get_flag(notmuch::MessageFlag::Match);
+        match_ret!(mmatched == nmatched);
+    }
+    if let Some(mexclude) = mv.excluded {
+        let exclude = message.get_flag(notmuch::MessageFlag::Excluded);
+        match_ret!(mexclude == exclude);
+    }
+    Ok(true)
 }
 
 struct Templ<'a> {
     regex: Regex,
     templ_message: &'a str,
-    templ_respons: Option<&'a str>,
+    templ_respons: &'a str,
 }
 
-// this whole function feels slow
-// good enough for now
-// change this to message?
-fn template<'a>(regex: &Regex, template: &'a str, date: &DelayedFormat<StrftimeItems<'a>>, num: i32, total: i32, from: &Cow<str>, subject: &String, tags: String) -> String {
-        let template = regex.replace_all(template, |caps: &Captures| {
-            let str = caps.get(1).map(|x| x.as_str().trim());
-            let padding: Option<usize> = caps.get(2).map(|x| x.as_str().parse().unwrap());
-            let mut string = match str {
-                Some("date") => format!("{}", date),
-                Some("index") => format!("{}", num),
-                Some("total") => format!("{}", total),
-                Some("from") => format!("{}", from),
-                Some("subject") => format!("{}", subject),
-                Some("tags") => format!("{}", tags),
-                Some(x) => panic!("Tag {} not supported", x),
-                _ => panic!("Syntax error, couldn't match template")
-            };
-            if let Some(pad) = padding {
-                string = format!("{:pad$}", string, pad=pad);
-            }
-            string
-        });
-        template.to_string()
+/// change subject to response and allow for subject
+fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Message, subject: &String, num: i32, total: i32) -> Result<String> {
+    let from = message.header("From")?.unwrap_or_default();
+    // let id = message.id();
+    let tags: Vec<String> = message.tags().collect();
+    let tags_string = tags.join(", ");
+    let unix_date = message.date();
+    let date = show_time(unix_date);
+
+    let template = regex.replace_all(template, |caps: &Captures| {
+        let str = caps.get(1).map(|x| x.as_str().trim());
+        let pad: usize = caps.get(2).map(|x| x.as_str().parse().unwrap()).unwrap_or(0);
+
+        let string = match str {
+            Some("date") => format!("{:pad$}", date),
+            Some("index") => format!("{:0>pad$}", num),
+            Some("total") => format!("{:0>pad$}", total),
+            Some("from") => format!("{:pad$}", from),
+            Some("subject") => format!("{:pad$}", subject),
+            Some("tags") => format!("{:pad$}", tags_string),
+            Some(x) => panic!("Tag {} not supported", x),
+            _ => panic!("Syntax error, couldn't match template")
+        };
+        string
+    });
+    Ok(template.to_string())
+}
+
+fn template_thread<'a>(regex: &Regex, template: &'a str, thread: &notmuch::Thread) -> Result<String> {
+    // let id = thread.id();
+    let subject = thread.subject();
+    let subfixed = fix_subject(&subject);
+    let authors = thread.authors().join(", ");
+    let total = thread.total_messages();
+    let matched = thread.matched_messages();
+    let unix_date = thread.newest_date();
+    let date = show_time(unix_date);
+    let tags: Vec<String> = thread.tags().collect();
+    let tags_string = tags.join(", ");
+
+    let template = regex.replace_all(template, |caps: &Captures| {
+        let str = caps.get(1).map(|x| x.as_str().trim());
+        let pad: usize = caps.get(2).map(|x| x.as_str().parse().unwrap()).unwrap_or(0);
+
+        let string = match str {
+            Some("date") => format!("{:pad$}", date),
+            Some("index") => format!("{:0>pad$}", matched),
+            Some("total") => format!("{:0>pad$}", total),
+            Some("from") => format!("{:pad$}", authors),
+            Some("subject") => format!("{:pad$}", subfixed),
+            Some("tags") => format!("{:pad$}", tags_string),
+            Some(x) => panic!("Tag {} not supported", x),
+            _ => panic!("Syntax error, couldn't match template")
+        };
+        string
+    });
+    Ok(template.to_string())
 }
 
 fn show_time<'a>(date: i64) -> DelayedFormat<StrftimeItems<'a>> {
@@ -155,30 +244,15 @@ fn fix_subject(sub: &str) -> String {
         }).collect()
 }
 
-fn show_threads<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_threads<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
-    let regex = Regex::new(r"\{([^:])(:?\d)?\}").unwrap();
-    let templ = Templ {
-        regex,
-        templ_message,
-        templ_respons: None,
-    };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     for thread in threads {
         let id = thread.id();
-        let subject = thread.subject();
-        let subfixed = fix_subject(&subject);
-        let authors = thread.authors();
-        let total = thread.total_messages();
-        let matched = thread.matched_messages();
-        let unix_date = thread.newest_date();
-        let date = show_time(unix_date);
-
-        let tags: Vec<String> = thread.tags().collect();
-        let str = template(&templ.regex, &templ.templ_message, &date, matched, total, &Cow::from(authors.join(" ")), &subfixed, tags.join(", "));
-        let tuple = Show { id: id.to_string(), entry: str, matched: true };
+        let str = template_thread(&templ.regex, &templ.templ_message, &thread)?;
+        let tuple = Show { id: id.to_string(), entry: str, highlight: false };
         serde_json::to_writer(&mut *writer, &tuple)?;
         write!(writer,"\n")?;
     }
@@ -218,7 +292,7 @@ impl Ord for OrderMessage {
 struct Show {
     id: String,
     entry: String,
-    matched: bool,
+    highlight: bool,
 }
 
 fn flush_messages<W>(heap: &mut BinaryHeap<OrderMessage>, sort: Sort, reference: i64, writer: &mut W) -> Result<()>
@@ -270,14 +344,12 @@ where W: io::Write {
     let matched = message.get_flag(notmuch::MessageFlag::Match);
     if matched {
         let id = message.id();
+        let unix_date = message.date();
         let subject = message.header("Subject")?.unwrap_or_default();
         let subfixed = fix_subject(&subject);
-        let tags: Vec<String> = message.tags().collect();
-        let from = message.header("From")?.unwrap_or_default();
-        let unix_date = message.date();
-        let date = show_time(unix_date);
-        let str = template(&templ.regex, &templ.templ_message, &date, counter, total, &from, &subfixed, tags.join(", "));
-        let show = Show { id: id.to_string(), entry: str, matched};
+        let highlight = highlight_message(mv, message, counter, total)?;
+        let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, counter, total)?;
+        let show = Show { id: id.to_string(), entry: str, highlight};
         if compare_diff(unix_date, reference, sort) {
             let om = OrderMessage(unix_date, sort, show);
             heap.push(om)
@@ -292,15 +364,15 @@ where W: io::Write {
     Ok(counter)
 }
 
-fn show_messages<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_messages<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
-    let regex = Regex::new(REGEXSTR).unwrap();
-    let templ = Templ {
-        regex,
-        templ_message,
-        templ_respons: None,
-    };
+    // let regex = Regex::new(REGEXSTR).unwrap();
+    // let templ = Templ {
+    //     regex,
+    //     templ_message,
+    //     templ_respons: None,
+    // };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     let mut heap = BinaryHeap::new();
@@ -340,27 +412,25 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
             newstring.push_str("─")
         }
 
-        let tags: Vec<String> = message.tags().collect();
-        let from = message.header("From")?.unwrap_or_default();
-        let subject = message.header("Subject")?.unwrap_or_default();
-        let subfixed = fix_subject(&subject);
         let matched = message.get_flag(notmuch::MessageFlag::Match);
         let id = message.id();
-        let unix_date = message.date();
-        let date = show_time(unix_date);
 
         if level > 0 && n > 0 {
             if matched {
-                let str = template(&templ.regex, &templ.templ_respons.unwrap(), &date, n+1, total, &from, &newstring, tags.join(", "));
-                let show = Show { id: id.to_string(), entry: str, matched };
+                let highlight = highlight_message(mv, message, n+1, total)?;
+                let str = template_message(&templ.regex, &templ.templ_respons, &message, &newstring, n+1, total)?;
+                let show = Show { id: id.to_string(), entry: str, highlight };
                 serde_json::to_writer(&mut *writer, &show)?;
                 write!(writer,"\n")?;
                 return Ok(-1);
             }
         } else {
             if matched {
-                let str = template(&templ.regex, &templ.templ_message, &date, n+1, total, &from, &subfixed, tags.join(", "));
-                let show = Show { id: id.to_string(), entry: str, matched };
+                let subject = message.header("Subject")?.unwrap_or_default();
+                let subfixed = fix_subject(&subject);
+                let highlight = highlight_message(mv, message, n+1, total)?;
+                let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, n+1, total)?;
+                let show = Show { id: id.to_string(), entry: str, highlight};
                 serde_json::to_writer(&mut *writer, &show)?;
                 write!(writer,"\n")?;
                 return Ok(-1);
@@ -384,15 +454,15 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
 }
 
 /// clean this up, I don't want more args either
-fn show_thread_single<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_thread_single<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(search)?;
-    let regex = Regex::new(REGEXSTR).unwrap();
-    let templ = Templ {
-        regex,
-        templ_message,
-        templ_respons,
-    };
+    // let regex = Regex::new(REGEXSTR).unwrap();
+    // let templ = Templ {
+    //     regex,
+    //     templ_message,
+    //     templ_respons,
+    // };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     for thread in threads {
@@ -428,22 +498,20 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32
             newstring.push_str("─")
         }
 
-        let tags: Vec<String> = message.tags().collect();
-        let from = message.header("From")?.unwrap_or_default();
-        let subject = message.header("Subject")?.unwrap_or_default();
-        let subfixed = fix_subject(&subject);
         let matched = message.get_flag(notmuch::MessageFlag::Match);
         let id = message.id();
-        let unix_date = message.date();
-        let date = show_time(unix_date);
 
         if level > 0 && n > 0 {
-            let str = template(&templ.regex, &templ.templ_respons.unwrap(), &date, n+1, total, &from, &newstring, tags.join(", "));
-            let show = Show { id: id.to_string(), entry: str, matched };
+            let highlight = highlight_message(mv, message, n+1, total)?;
+            let str = template_message(&templ.regex, &templ.templ_respons, &message, &newstring, n+1, total)?;
+            let show = Show { id: id.to_string(), entry: str, highlight };
             vec.push(show)
         } else {
-            let str = template(&templ.regex, &templ.templ_message, &date, n+1, total, &from, &subfixed, tags.join(", "));
-            let show = Show { id: id.to_string(), entry: str, matched };
+            let subject = message.header("Subject")?.unwrap_or_default();
+            let subfixed = fix_subject(&subject);
+            let highlight = highlight_message(mv, message, n+1, total)?;
+            let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, n+1, total)?;
+            let show = Show { id: id.to_string(), entry: str, highlight };
             vec.push(show)
         }
 
@@ -460,15 +528,15 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32
     Ok(n)
 }
 
-fn show_thread_tree<W>(db: &notmuch::Database, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_thread_tree<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(search)?;
-    let regex = Regex::new(REGEXSTR).unwrap();
-    let templ = Templ {
-        regex,
-        templ_message,
-        templ_respons,
-    };
+    // let regex = Regex::new(REGEXSTR).unwrap();
+    // let templ = Templ {
+    //     regex,
+    //     templ_message,
+    //     templ_respons,
+    // };
     query.set_sort(sort);
     let threads = query.search_threads()?;
     for thread in threads {
@@ -651,6 +719,16 @@ struct Cli {
 
     #[clap(subcommand)]
     command: Commands,
+
+    #[clap(short, long)]
+    #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {subject} ({tags})"))]
+    entry_fmt: String,
+
+    #[clap(short, long)]
+    #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {subject}▶ ({tags})"))]
+    response_fmt: String,
+
+    highlight: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -684,22 +762,29 @@ enum Commands {
         search: Vec<String>,
     }
 }
-
-
+// Highligt
+// Highligt
 fn main() -> Result<()>{
     let args = Cli::parse();
 
     let db = notmuch::Database::open_with_config(args.db_path, notmuch::DatabaseMode::ReadOnly, args.conf_path, args.profile.as_deref())?;
     let sort = from_str(&args.sort);
     let mut writer = std::io::BufWriter::new(io::stdout().lock());
+    let regex = Regex::new(REGEXSTR).unwrap();
+    let templ = Templ {
+        regex,
+        templ_message: &args.entry_fmt,
+        templ_respons: &args.response_fmt,
+    };
+    let highligt: Option<Highlight> = args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed"));
 
     match &args.command {
         Commands::Messages{search} => messages(&db, sort, &search.join(" "), &mut writer)?,
         Commands::Threads{search} => threads(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowTree{search} => show_thread_tree(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowSingleTree{search} => show_thread_single(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowMessage{search} => show_messages(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowThread{search} => show_threads(&db, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowTree{search} => show_thread_tree(&db, &templ, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowSingleTree{search} => show_thread_single(&db, &templ, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowMessage{search} => show_messages(&db, &templ, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowThread{search} => show_threads(&db, &templ, sort, &search.join(" "), &mut writer)?,
         Commands::MessagesBefore{id, search} => {
             if search.is_empty() {
                 show_before_message(&db, sort, id, &None, &mut writer)?;
