@@ -33,7 +33,8 @@ struct Highlight {
     num: Option<i32>,
     total: Option<i32>,
     from: Option<String>,
-    to: Option<String>,
+    // can't do this one
+    // to: Option<String>,
     subject: Option<String>,
     tags: Option<Vec<String>>,
     matched: Option<bool>,
@@ -117,7 +118,7 @@ macro_rules! check_none {
 }
 
 fn check(hl: &Highlight) -> bool {
-    check_none!(hl.id, hl.date, hl.num, hl.total, hl.from, hl.to, hl.subject, hl.tags, hl.matched, hl.excluded)
+    check_none!(hl.id, hl.date, hl.num, hl.total, hl.from, hl.subject, hl.tags, hl.matched, hl.excluded)
 }
 
 fn empty(hl: Option<Highlight>) -> Option<Highlight> {
@@ -160,10 +161,11 @@ fn highlight_message<'a>(mv: &Option<Highlight>, message: &notmuch::Message, num
             let from = message.header("From")?.unwrap_or_default();
             match_ret!(from.contains(mfrom));
         }
-        if let Some(ref mto) = mv.from {
-            let to = message.header("To")?.unwrap_or_default();
-            match_ret!(to.contains(mto));
-        }
+        // Can't do this one!
+        // if let Some(ref mto) = mv.from {
+        //     let to = message.header("To")?.unwrap_or_default();
+        //     match_ret!(to.contains(mto));
+        // }
         if let Some(ref msubject) = mv.subject {
             let subject = message.header("Subject")?.unwrap_or_default();
             match_ret!(msubject == subject.as_ref());
@@ -195,7 +197,7 @@ struct Templ<'a> {
 fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Message, response: Option<String>, num: i32, total: i32) -> Result<String> {
     // let id = message.id();
     let from = message.header("From")?.unwrap_or_default();
-    let to = message.header("To")?.unwrap_or_default();
+    // let to = message.header("To")?.unwrap_or_default();
 
     let tags: Vec<String> = message.tags().collect();
     let tags_string = tags.join(", ");
@@ -214,7 +216,7 @@ fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Mes
             Some("index") => format!("{:0>pad$}", num),
             Some("total") => format!("{:0>pad$}", total),
             Some("from") => format!("{:pad$}", from),
-            Some("to") => format!("{:pad$}", to),
+            // Some("to") => format!("{:pad$}", to),
             Some("subject") => format!("{:pad$}", subfixed),
             Some("response") => {
                 match response {
@@ -510,15 +512,16 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, rt: &Runtime, level: i32,
 
         let id = message.id();
 
+
         if level > 0 && n > 0 {
             let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
             let str = template_message(&rt.templ.regex, &rt.templ.templ_respons, &message, Some(newstring), n+1, total)?;
-            let show = Show { id: id.to_string(), entry: str, highlight };
+            let show = Show { id: id.to_string(), entry: str, highlight};
             vec.push(show)
         } else {
             let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
             let str = template_message(&rt.templ.regex, &rt.templ.templ_message, &message, None, n+1, total)?;
-            let show = Show { id: id.to_string(), entry: str, highlight };
+            let show = Show { id: id.to_string(), entry: str, highlight};
             vec.push(show)
         }
 
