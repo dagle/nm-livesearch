@@ -20,6 +20,33 @@ type Result<T> = result::Result<T, Error>;
 
 static REGEXSTR: &str = r"\{([^:]*?):?(\d+)?\}";
 
+struct Runtime<'a> {
+    templ: &'a Templ<'a>,
+    sort: Sort,
+    highlight: Option<Highlight>
+}
+
+#[derive(Deserialize, Debug)]
+struct Highlight {
+    id: Option<String>,
+    date: Option<String>,
+    num: Option<i32>,
+    total: Option<i32>,
+    from: Option<String>,
+    to: Option<String>,
+    subject: Option<String>,
+    tags: Option<Vec<String>>,
+    matched: Option<bool>,
+    excluded: Option<bool>,
+}
+
+#[derive(Serialize, Debug)]
+struct Show {
+    id: String,
+    entry: String,
+    highlight: bool,
+}
+
 #[derive(Debug)]
 enum Error {
     SerdeErr(serde_json::Error),
@@ -65,19 +92,6 @@ impl std::convert::From<serde_json::Error> for Error {
     }
 }
 
-#[derive(Deserialize, Debug)]
-struct Highlight {
-    id: Option<String>,
-    date: Option<i64>,
-    num: Option<i32>,
-    total: Option<i32>,
-    from: Option<String>,
-    subject: Option<String>,
-    tags: Option<Vec<String>>,
-    matched: Option<bool>,
-    excluded: Option<bool>,
-}
-
 // this make updating easier, if we change semantics
 macro_rules! match_ret {
     ( $x:expr ) => {
@@ -102,64 +116,72 @@ macro_rules! check_none {
     }
 }
 
-fn same_day(date: i64, mdate: i64) -> bool {
-    let mnaive = NaiveDateTime::from_timestamp(mdate, 0);
-    let mdatetime: DateTime<Utc> = DateTime::from_utc(mnaive, Utc);
-    let naive = NaiveDateTime::from_timestamp(date, 0);
-    let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
-    // idk, maybe we can do this easier
-    datetime.year() == mdatetime.year() && datetime.month() == mdatetime.month() && datetime.day() == mdatetime.day()
+fn check(hl: &Highlight) -> bool {
+    check_none!(hl.id, hl.date, hl.num, hl.total, hl.from, hl.to, hl.subject, hl.tags, hl.matched, hl.excluded)
 }
 
-fn empty(mv: &Highlight) -> bool {
-    check_none!(mv.id, mv.date, mv.num, mv.total, mv.from, mv.subject, mv.tags, mv.matched, mv.excluded)
+fn empty(hl: Option<Highlight>) -> Option<Highlight> {
+    if let Some(ref x) = hl {
+        if check(x) {
+            return None;
+        }
+        return hl;
+    }
+    return None;
 }
 
-// TODO if all fields are None, then return false
 fn highlight_message<'a>(mv: &Option<Highlight>, message: &notmuch::Message, num: i32, total: i32) -> Result<bool> {
     if let None = mv {
         return Ok(false);
     }
 
-    let mv = mv.unwrap();
-
-    if let Some(ref mid) = mv.id {
-        let id = message.id();
-        match_ret!(mid == id.as_ref());
-    }
-    if let Some(mdate) = mv.date {
-        let unix_date = message.date();
-        // maybe we can do something more interesting than this
-        match_ret!(same_day(unix_date, mdate));
-
-    }
-    if let Some(mnum) = mv.num {
-        match_ret!(mnum == num);
-    }
-    if let Some(mtotal) = mv.total {
-        match_ret!(mtotal == total);
-    }
-    if let Some(ref mfrom) = mv.from {
-        let from = message.header("From")?.unwrap_or_default();
-        match_ret!(mfrom == from.as_ref());
-    }
-    if let Some(ref msubject) = mv.subject {
-        let subject = message.header("Subject")?.unwrap_or_default();
-        match_ret!(msubject == subject.as_ref());
-    }
-    if let Some(ref mtags) = mv.tags {
-        let tags: Vec<String> = message.tags().collect();
-        for mtag in mtags {
-            match_ret!(tags.contains(mtag));
+    if let Some(ref mv) = mv {
+        if let Some(ref mid) = mv.id {
+            let id = message.id();
+            match_ret!(mid == id.as_ref());
         }
-    }
-    if let Some(mmatched) = mv.matched {
-        let nmatched = message.get_flag(notmuch::MessageFlag::Match);
-        match_ret!(mmatched == nmatched);
-    }
-    if let Some(mexclude) = mv.excluded {
-        let exclude = message.get_flag(notmuch::MessageFlag::Excluded);
-        match_ret!(mexclude == exclude);
+        // we convert date to string to a string
+        // so we can match 2021-11-09 agains 2021-11 and get a match
+        if let Some(ref mdate) = mv.date {
+            let unix_date = message.date();
+            let date = show_time(unix_date);
+            match_ret!(date.to_string().contains(mdate));
+        }
+        if let Some(mnum) = mv.num {
+            match_ret!(mnum == num);
+        }
+        if let Some(mtotal) = mv.total {
+            match_ret!(mtotal == total);
+        }
+        // when we do a match on email, the maddress need to be just the address:
+        // so "apa@bep.com" would match "Mr Apa <apa@bep.com>" or "apa@bep.com"
+        // it can't handle idn
+        if let Some(ref mfrom) = mv.from {
+            let from = message.header("From")?.unwrap_or_default();
+            match_ret!(from.contains(mfrom));
+        }
+        if let Some(ref mto) = mv.from {
+            let to = message.header("To")?.unwrap_or_default();
+            match_ret!(to.contains(mto));
+        }
+        if let Some(ref msubject) = mv.subject {
+            let subject = message.header("Subject")?.unwrap_or_default();
+            match_ret!(msubject == subject.as_ref());
+        }
+        if let Some(ref mtags) = mv.tags {
+            let tags: Vec<String> = message.tags().collect();
+            for mtag in mtags {
+                match_ret!(tags.contains(mtag));
+            }
+        }
+        if let Some(mmatched) = mv.matched {
+            let nmatched = message.get_flag(notmuch::MessageFlag::Match);
+            match_ret!(mmatched == nmatched);
+        }
+        if let Some(mexclude) = mv.excluded {
+            let exclude = message.get_flag(notmuch::MessageFlag::Excluded);
+            match_ret!(mexclude == exclude);
+        }
     }
     Ok(true)
 }
@@ -170,14 +192,18 @@ struct Templ<'a> {
     templ_respons: &'a str,
 }
 
-/// change subject to response and allow for subject
-fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Message, subject: &String, num: i32, total: i32) -> Result<String> {
-    let from = message.header("From")?.unwrap_or_default();
+fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Message, response: Option<String>, num: i32, total: i32) -> Result<String> {
     // let id = message.id();
+    let from = message.header("From")?.unwrap_or_default();
+    let to = message.header("To")?.unwrap_or_default();
+
     let tags: Vec<String> = message.tags().collect();
     let tags_string = tags.join(", ");
     let unix_date = message.date();
     let date = show_time(unix_date);
+
+    let subject = message.header("Subject")?.unwrap_or_default();
+    let subfixed = fix_subject(&subject);
 
     let template = regex.replace_all(template, |caps: &Captures| {
         let str = caps.get(1).map(|x| x.as_str().trim());
@@ -188,7 +214,14 @@ fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Mes
             Some("index") => format!("{:0>pad$}", num),
             Some("total") => format!("{:0>pad$}", total),
             Some("from") => format!("{:pad$}", from),
-            Some("subject") => format!("{:pad$}", subject),
+            Some("to") => format!("{:pad$}", to),
+            Some("subject") => format!("{:pad$}", subfixed),
+            Some("response") => {
+                match response {
+                    Some(ref response) => format!("{:pad$}", response),
+                    None => panic!("Trying to use response outside of tree")
+                }
+            },
             Some("tags") => format!("{:pad$}", tags_string),
             Some(x) => panic!("Tag {} not supported", x),
             _ => panic!("Syntax error, couldn't match template")
@@ -252,6 +285,7 @@ fn show_threads<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &s
     for thread in threads {
         let id = thread.id();
         let str = template_thread(&templ.regex, &templ.templ_message, &thread)?;
+        // TODO add highlight!
         let tuple = Show { id: id.to_string(), entry: str, highlight: false };
         serde_json::to_writer(&mut *writer, &tuple)?;
         write!(writer,"\n")?;
@@ -286,13 +320,6 @@ impl Ord for OrderMessage {
         }
         self.0.cmp(&other.0)
     }
-}
-
-#[derive(Serialize, Debug)]
-struct Show {
-    id: String,
-    entry: String,
-    highlight: bool,
 }
 
 fn flush_messages<W>(heap: &mut BinaryHeap<OrderMessage>, sort: Sort, reference: i64, writer: &mut W) -> Result<()>
@@ -338,20 +365,18 @@ fn compare_diff(current: i64, reference: i64, sort: Sort) -> bool {
     }
 }
 
-fn show_messages_helper<W>(message: &notmuch::Message, templ: &Templ, sort: Sort, reference: i64, num: i32, total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage>) -> Result<i32>
+fn show_messages_helper<W>(message: &notmuch::Message, rt: &Runtime, reference: i64, num: i32, total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage>) -> Result<i32>
 where W: io::Write {
     let mut counter = num + 1;
     let matched = message.get_flag(notmuch::MessageFlag::Match);
     if matched {
         let id = message.id();
         let unix_date = message.date();
-        let subject = message.header("Subject")?.unwrap_or_default();
-        let subfixed = fix_subject(&subject);
-        let highlight = highlight_message(mv, message, counter, total)?;
-        let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, counter, total)?;
+        let highlight = highlight_message(&rt.highlight, message, counter, total)?;
+        let str = template_message(&rt.templ.regex, &rt.templ.templ_message, &message, None, counter, total)?;
         let show = Show { id: id.to_string(), entry: str, highlight};
-        if compare_diff(unix_date, reference, sort) {
-            let om = OrderMessage(unix_date, sort, show);
+        if compare_diff(unix_date, reference, rt.sort) {
+            let om = OrderMessage(unix_date, rt.sort, show);
             heap.push(om)
         } else {
             serde_json::to_writer(&mut *writer, &show)?;
@@ -359,37 +384,31 @@ where W: io::Write {
         }
     }
     for message in message.replies() {
-        counter = show_messages_helper(&message, &templ, sort, reference, counter, total, writer, heap)?;
+        counter = show_messages_helper(&message, &rt, reference, counter, total, writer, heap)?;
     }
     Ok(counter)
 }
 
-fn show_messages<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_messages<W>(db: &notmuch::Database, rt: &Runtime, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
-    // let regex = Regex::new(REGEXSTR).unwrap();
-    // let templ = Templ {
-    //     regex,
-    //     templ_message,
-    //     templ_respons: None,
-    // };
-    query.set_sort(sort);
+    query.set_sort(rt.sort);
     let threads = query.search_threads()?;
     let mut heap = BinaryHeap::new();
     for thread in threads {
-        let reference = compare_time(&thread, sort);
+        let reference = compare_time(&thread, rt.sort);
         let total = thread.total_messages();
-        flush_messages(&mut heap, sort, reference, writer)?;
+        flush_messages(&mut heap, rt.sort, reference, writer)?;
         let top = thread.toplevel_messages();
         let mut counter = 0;
         for message in top {
-            counter = show_messages_helper(&message, &templ, sort, reference, counter, total, writer, &mut heap)?;
+            counter = show_messages_helper(&message, &rt, reference, counter, total, writer, &mut heap)?;
         }
     }
     Ok(())
 }
 
-fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32, prestring: String, num: i32, total: i32, writer: &mut W) -> Result<i32>
+fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, rt: &Runtime, level: i32, prestring: String, num: i32, total: i32, writer: &mut W) -> Result<i32>
     where W: io::Write {
     let mut j = 1;
     let length = messages.len();
@@ -417,8 +436,8 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
 
         if level > 0 && n > 0 {
             if matched {
-                let highlight = highlight_message(mv, message, n+1, total)?;
-                let str = template_message(&templ.regex, &templ.templ_respons, &message, &newstring, n+1, total)?;
+                let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
+                let str = template_message(&rt.templ.regex, &rt.templ.templ_respons, &message, Some(newstring), n+1, total)?;
                 let show = Show { id: id.to_string(), entry: str, highlight };
                 serde_json::to_writer(&mut *writer, &show)?;
                 write!(writer,"\n")?;
@@ -426,10 +445,8 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
             }
         } else {
             if matched {
-                let subject = message.header("Subject")?.unwrap_or_default();
-                let subfixed = fix_subject(&subject);
-                let highlight = highlight_message(mv, message, n+1, total)?;
-                let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, n+1, total)?;
+                let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
+                let str = template_message(&rt.templ.regex, &rt.templ.templ_message, &message, None, n+1, total)?;
                 let show = Show { id: id.to_string(), entry: str, highlight};
                 serde_json::to_writer(&mut *writer, &show)?;
                 write!(writer,"\n")?;
@@ -444,7 +461,7 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
         } else {
             newstring.push_str("  ")
         }
-        n = show_message_tree_single(&replies_vec, &templ, level + 1, newstring, n + 1, total, writer)?;
+        n = show_message_tree_single(&replies_vec, &rt, level + 1, newstring, n + 1, total, writer)?;
         if n == -1 {
             return Ok(-1);
         }
@@ -453,29 +470,22 @@ fn show_message_tree_single<W>(messages: &Vec<notmuch::Message>, templ: &Templ, 
     Ok(n)
 }
 
-/// clean this up, I don't want more args either
-fn show_thread_single<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+/// TODO clean this up, I don't want more args either
+fn show_thread_single<W>(db: &notmuch::Database, rt: &Runtime, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(search)?;
-    // let regex = Regex::new(REGEXSTR).unwrap();
-    // let templ = Templ {
-    //     regex,
-    //     templ_message,
-    //     templ_respons,
-    // };
-    query.set_sort(sort);
+    query.set_sort(rt.sort);
     let threads = query.search_threads()?;
     for thread in threads {
         let total = thread.total_messages();
         let messages = thread.toplevel_messages();
         let mvec = messages.collect();
-        show_message_tree_single(&mvec, &templ, 0, "".to_string(), 0, total, writer)?;
+        show_message_tree_single(&mvec, &rt, 0, "".to_string(), 0, total, writer)?;
     }
     Ok(())
 }
 
-
-fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
+fn show_message_tree(messages: &Vec<notmuch::Message>, rt: &Runtime, level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
     {
     let mut j = 1;
     let length = messages.len();
@@ -498,19 +508,16 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32
             newstring.push_str("─")
         }
 
-        let matched = message.get_flag(notmuch::MessageFlag::Match);
         let id = message.id();
 
         if level > 0 && n > 0 {
-            let highlight = highlight_message(mv, message, n+1, total)?;
-            let str = template_message(&templ.regex, &templ.templ_respons, &message, &newstring, n+1, total)?;
+            let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
+            let str = template_message(&rt.templ.regex, &rt.templ.templ_respons, &message, Some(newstring), n+1, total)?;
             let show = Show { id: id.to_string(), entry: str, highlight };
             vec.push(show)
         } else {
-            let subject = message.header("Subject")?.unwrap_or_default();
-            let subfixed = fix_subject(&subject);
-            let highlight = highlight_message(mv, message, n+1, total)?;
-            let str = template_message(&templ.regex, &templ.templ_message, &message, &subfixed, n+1, total)?;
+            let highlight = highlight_message(&rt.highlight, message, n+1, total)?;
+            let str = template_message(&rt.templ.regex, &rt.templ.templ_message, &message, None, n+1, total)?;
             let show = Show { id: id.to_string(), entry: str, highlight };
             vec.push(show)
         }
@@ -522,30 +529,23 @@ fn show_message_tree(messages: &Vec<notmuch::Message>, templ: &Templ, level: i32
         } else {
             newstring.push_str("  ")
         }
-        n = show_message_tree(&replies_vec, &templ, level + 1, newstring, n + 1, total, vec)?;
+        n = show_message_tree(&replies_vec, &rt, level + 1, newstring, n + 1, total, vec)?;
         j += 1;
     }
     Ok(n)
 }
 
-fn show_thread_tree<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_thread_tree<W>(db: &notmuch::Database, rt: &Runtime, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(search)?;
-    // let regex = Regex::new(REGEXSTR).unwrap();
-    // let templ = Templ {
-    //     regex,
-    //     templ_message,
-    //     templ_respons,
-    // };
-    query.set_sort(sort);
+    query.set_sort(rt.sort);
     let threads = query.search_threads()?;
     for thread in threads {
         let total = thread.total_messages();
         let messages = thread.toplevel_messages();
         let mut vec = Vec::new();
         let mvec = messages.collect();
-        // output a singelton 
-        show_message_tree(&mvec, &templ, 0, "".to_string(), 0, total, &mut vec)?;
+        show_message_tree(&mvec, &rt, 0, "".to_string(), 0, total, &mut vec)?;
         serde_json::to_writer(&mut *writer, &vec)?;
         write!(writer,"\n")?;
     }
@@ -725,9 +725,10 @@ struct Cli {
     entry_fmt: String,
 
     #[clap(short, long)]
-    #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {subject}▶ ({tags})"))]
+    #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {response}▶ ({tags})"))]
     response_fmt: String,
 
+    #[clap(short, long)]
     highlight: Option<String>,
 }
 
@@ -742,28 +743,33 @@ enum Commands {
         search: Vec<String>,
     },
     MessagesBefore {
+        #[clap(required = true)]
         id: String,
         search: Vec<String>,
     },
     MessagesAfter {
+        #[clap(required = true)]
         id: String,
         search: Vec<String>,
     },
     ShowTree {
+        #[clap(required = true)]
         search: Vec<String>,
     },
     ShowSingleTree {
+        #[clap(required = true)]
         search: Vec<String>,
     },
     ShowMessage {
+        #[clap(required = true)]
         search: Vec<String>,
     },
     ShowThread {
+        #[clap(required = true)]
         search: Vec<String>,
     }
 }
-// Highligt
-// Highligt
+
 fn main() -> Result<()>{
     let args = Cli::parse();
 
@@ -776,14 +782,20 @@ fn main() -> Result<()>{
         templ_message: &args.entry_fmt,
         templ_respons: &args.response_fmt,
     };
-    let highligt: Option<Highlight> = args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed"));
+    let highligt: Option<Highlight> = empty(args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed")));
+
+    let runtime = Runtime {
+        templ: &templ,
+        sort,
+        highlight: highligt,
+    };
 
     match &args.command {
         Commands::Messages{search} => messages(&db, sort, &search.join(" "), &mut writer)?,
         Commands::Threads{search} => threads(&db, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowTree{search} => show_thread_tree(&db, &templ, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowSingleTree{search} => show_thread_single(&db, &templ, sort, &search.join(" "), &mut writer)?,
-        Commands::ShowMessage{search} => show_messages(&db, &templ, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowTree{search} => show_thread_tree(&db, &runtime, &search.join(" "), &mut writer)?,
+        Commands::ShowSingleTree{search} => show_thread_single(&db, &runtime, &search.join(" "), &mut writer)?,
+        Commands::ShowMessage{search} => show_messages(&db, &runtime, &search.join(" "), &mut writer)?,
         Commands::ShowThread{search} => show_threads(&db, &templ, sort, &search.join(" "), &mut writer)?,
         Commands::MessagesBefore{id, search} => {
             if search.is_empty() {
