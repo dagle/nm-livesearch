@@ -21,7 +21,7 @@ type Result<T> = result::Result<T, Error>;
 static REGEXSTR: &str = r"\{([^:]*?):?(\d+)?\}";
 
 struct Runtime<'a> {
-    templ: &'a Templ<'a>,
+    templ: Templ<'a>,
     sort: Sort,
     highlight: Option<Highlight>
 }
@@ -279,14 +279,14 @@ fn fix_subject(sub: &str) -> String {
         }).collect()
 }
 
-fn show_threads<W>(db: &notmuch::Database, templ: &Templ, sort: Sort, search: &str, writer: &mut W) -> Result<()>
+fn show_threads<W>(db: &notmuch::Database, rt: &Runtime, search: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
     let query = db.create_query(&search)?;
-    query.set_sort(sort);
+    query.set_sort(rt.sort);
     let threads = query.search_threads()?;
     for thread in threads {
         let id = thread.id();
-        let str = template_thread(&templ.regex, &templ.templ_message, &thread)?;
+        let str = template_thread(&rt.templ.regex, &rt.templ.templ_message, &thread)?;
         // TODO add highlight!
         let tuple = Show { id: id.to_string(), entry: str, highlight: false };
         serde_json::to_writer(&mut *writer, &tuple)?;
@@ -638,6 +638,7 @@ fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()>
 
 fn messages<W>(db: &notmuch::Database, sort: Sort, str: &str, writer: &mut W) -> Result<()>
     where W: io::Write {
+    // println!("search:{}", str);
     let query = db.create_query(str)?;
     query.set_sort(sort);
     let messages = query.search_messages()?;
@@ -788,7 +789,7 @@ fn main() -> Result<()>{
     let highligt: Option<Highlight> = empty(args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed")));
 
     let runtime = Runtime {
-        templ: &templ,
+        templ: templ,
         sort,
         highlight: highligt,
     };
@@ -799,7 +800,7 @@ fn main() -> Result<()>{
         Commands::ShowTree{search} => show_thread_tree(&db, &runtime, &search.join(" "), &mut writer)?,
         Commands::ShowSingleTree{search} => show_thread_single(&db, &runtime, &search.join(" "), &mut writer)?,
         Commands::ShowMessage{search} => show_messages(&db, &runtime, &search.join(" "), &mut writer)?,
-        Commands::ShowThread{search} => show_threads(&db, &templ, sort, &search.join(" "), &mut writer)?,
+        Commands::ShowThread{search} => show_threads(&db, &runtime, &search.join(" "), &mut writer)?,
         Commands::MessagesBefore{id, search} => {
             if search.is_empty() {
                 show_before_message(&db, sort, id, &None, &mut writer)?;
@@ -818,4 +819,127 @@ fn main() -> Result<()>{
         },
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use std::str;
+    use notmuch::Sort;
+    use std::io;
+    use crate::*;
+
+    static N: u8 = '\n' as u8;
+    struct LineCount {
+        lines: usize,
+    }
+
+    impl LineCount {
+        fn new() -> LineCount {
+            LineCount { lines: 0 }
+        }
+    }
+
+    impl io::Write for LineCount {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let mut i = 0;
+            for c in buf {
+                if *c == N {
+                    self.lines = self.lines + 1;
+                }
+                i = i + 1;
+            }
+            Ok(i)
+        }
+        // do we need to do anything? We don't buffer
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+    static TESTSEARCH: &str = "tag:important";
+
+    fn nm_runner(output: &str, nm_search: &str) -> usize {
+        let cmd = format!("notmuch search --output={} {} | wc -l", output, nm_search);
+        let output = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .output()
+            .expect("failed to execute process");
+        let s = str::from_utf8(&output.stdout).expect("cmd: failed to parse utf8 string");
+        let fixed = s.trim();
+        let num: usize = fixed.parse().expect("cmd: Couldn't parse number");
+        num
+    }
+    
+    // use the default database
+    // this is safe with the correct search, since this program never write
+    fn open_db() -> notmuch::Database {
+        let db_path: Option<String> = None;
+        let config_path: Option<String>  = None;
+        let profile: Option<&str>  = None;
+
+        notmuch::Database::open_with_config(db_path, notmuch::DatabaseMode::ReadOnly, config_path, profile).expect("Couldn't open db")
+    }
+    
+    fn mock_runtime<'a>(mes: &'a str, res: &'a str) -> Runtime<'a> {
+        let regex = Regex::new(REGEXSTR).unwrap();
+        let sort = Sort::OldestFirst;
+        let templ = Templ {
+            regex,
+            templ_message: mes,
+            templ_respons: res,
+        };
+        let highligt: Option<Highlight> = None;
+
+        let runtime = Runtime {
+            templ,
+            sort,
+            highlight: highligt,
+        };
+        runtime
+    }
+
+    #[test]
+    fn messages_num() {
+        let num = nm_runner("messages", TESTSEARCH);
+        let mut linecounter = LineCount::new();
+        let db = open_db();
+        let sort = Sort::OldestFirst;
+        messages(&db, sort, &TESTSEARCH, &mut linecounter).expect("nm-live: Couldn't fetch messages");
+        assert_eq!(num, linecounter.lines);
+    }
+
+    #[test]
+    fn show_messages_num() {
+        let db = open_db();
+        let sort = Sort::OldestFirst;
+        let mut linecounter = LineCount::new();
+        messages(&db, sort, &TESTSEARCH, &mut linecounter).expect("nm-live: Couldn't fetch messages");
+        let mut linecounter2 = LineCount::new();
+        let rt = mock_runtime("{date} [{index:02}/{total:02}] {from:25}│ {subject} ({tags})", "{date} [{index:02}/{total:02}] {from:25}│ {response}▶ ({tags})");
+        show_messages(&db, &rt, TESTSEARCH, &mut linecounter2).expect("nm-live: Couldn't show messages");
+        assert_eq!(linecounter.lines, linecounter2.lines);
+    }
+
+    #[test]
+    fn thread_num() {
+        let num = nm_runner("threads", TESTSEARCH);
+        let mut linecounter = LineCount::new();
+        let db = open_db();
+        let sort = Sort::OldestFirst;
+        threads(&db, sort, &TESTSEARCH, &mut linecounter).expect("nm-live: Couldn't fetch messages");
+        assert_eq!(num, linecounter.lines);
+    }
+
+    #[test]
+    fn show_thread_num() {
+        let db = open_db();
+        let sort = Sort::OldestFirst;
+        let mut linecounter = LineCount::new();
+        threads(&db, sort, &TESTSEARCH, &mut linecounter).expect("nm-live: Couldn't fetch messages");
+        let mut linecounter2 = LineCount::new();
+        let rt = mock_runtime("{date} [{index:02}/{total:02}] {from:25}│ {subject} ({tags})", "{date} [{index:02}/{total:02}] {from:25}│ {response}▶ ({tags})");
+        show_threads(&db, &rt, TESTSEARCH, &mut linecounter2).expect("nm-live: Couldn't show messages");
+        assert_eq!(linecounter.lines, linecounter2.lines);
+    }
 }
