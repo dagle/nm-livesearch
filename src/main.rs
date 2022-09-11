@@ -209,7 +209,7 @@ fn template_message<'a>(regex: &Regex, template: &'a str, message: &notmuch::Mes
 
     let template = regex.replace_all(template, |caps: &Captures| {
         let str = caps.get(1).map(|x| x.as_str().trim());
-        let pad: usize = caps.get(2).map(|x| x.as_str().parse().unwrap()).unwrap_or(0);
+        let pad: usize = caps.get(2).map(|x| x.as_str().parse().expect("regex doesn't capture a number")).unwrap_or(0);
 
         let string = match str {
             Some("date") => format!("{:pad$}", date),
@@ -247,7 +247,7 @@ fn template_thread<'a>(regex: &Regex, template: &'a str, thread: &notmuch::Threa
 
     let template = regex.replace_all(template, |caps: &Captures| {
         let str = caps.get(1).map(|x| x.as_str().trim());
-        let pad: usize = caps.get(2).map(|x| x.as_str().parse().unwrap()).unwrap_or(0);
+        let pad: usize = caps.get(2).map(|x| x.as_str().parse().expect("regex doesn't capture a number")).unwrap_or(0);
 
         let string = match str {
             Some("date") => format!("{:pad$}", date),
@@ -330,7 +330,7 @@ fn flush_messages<W>(heap: &mut BinaryHeap<OrderMessage>, sort: Sort, reference:
         match heap.peek() {
             Some(value) => {
                 if !compare_diff(value.0, reference, sort) {
-                    let top = heap.pop().unwrap();
+                    let top = heap.pop().expect("We peeked yet it's empty");
                     serde_json::to_writer(&mut *writer, &top.2)?;
                     write!(writer,"\n")?;
                 } else {
@@ -780,7 +780,7 @@ fn main() -> Result<()>{
     let db = notmuch::Database::open_with_config(args.db_path, notmuch::DatabaseMode::ReadOnly, args.conf_path, args.profile.as_deref())?;
     let sort = from_str(&args.sort);
     let mut writer = std::io::BufWriter::new(io::stdout().lock());
-    let regex = Regex::new(REGEXSTR).unwrap();
+    let regex = Regex::new(REGEXSTR).expect("Failed to make regex");
     let templ = Templ {
         regex,
         templ_message: &args.entry_fmt,
