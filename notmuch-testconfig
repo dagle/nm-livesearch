@@ -1,0 +1,7 @@
+[database]
+path=/test/testmail
+
+[user]
+name=Testi McTest
+primary_email=testi@testmail.org
+other_email=test_suite_other@testmailtwo.org;test_suite@otherdomain.org
