@@ -8,10 +8,11 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  NOTMUCH_CONFIG: /nm-livesearch/notmuch-testconfig
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     steps:
     - name: Setup
       run: |
@@ -19,6 +20,14 @@ jobs:
         sudo apt-get install notmuch
         sudo apt-get install libnotmuch-dev
     - uses: actions/checkout@v3
+      with:
+        path: nm-livesearch
+    - uses: actions/checkout@v2
+      with:
+        repository: dagle/galore-test
+        path: test
+    - name: NmSetup
+      run: notmuch new
     - name: Build
       run: cargo build --verbose
     - name: Run tests
