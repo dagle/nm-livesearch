@@ -786,12 +786,12 @@ fn main() -> Result<()>{
         templ_message: &args.entry_fmt,
         templ_respons: &args.response_fmt,
     };
-    let highligt: Option<Highlight> = empty(args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed")));
+    let highlight: Option<Highlight> = empty(args.highlight.map(|x| serde_json::from_str(x.as_ref()).expect("Parsing json highlighting failed")));
 
     let runtime = Runtime {
-        templ: templ,
+        templ,
         sort,
-        highlight: highligt,
+        highlight,
     };
 
     match &args.command {
@@ -889,12 +889,12 @@ mod tests {
             templ_message: mes,
             templ_respons: res,
         };
-        let highligt: Option<Highlight> = None;
+        let highlight: Option<Highlight> = None;
 
         let runtime = Runtime {
             templ,
             sort,
-            highlight: highligt,
+            highlight,
         };
         runtime
     }
