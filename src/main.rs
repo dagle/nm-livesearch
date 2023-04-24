@@ -49,7 +49,7 @@ struct Cli {
     #[clap(default_value_t = String::from("newest"))]
     sort: String,
 
-    #[clap(long, short)]
+    #[clap(long)]
     #[clap(default_value_t = 5)]
     humanize_limit: i64,
 
@@ -73,7 +73,7 @@ struct Cli {
     #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {response}▶ ({tags})"))]
     response_fmt: String,
 
-    #[clap(short, long)]
+    #[clap(long)]
     #[clap(default_value_t = String::from("%Y-%m-%d"))]
     date_format: String,
 
