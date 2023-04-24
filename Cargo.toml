@@ -6,7 +6,6 @@ edition = "2021"
 [profile.release]
 debug = 1
 
-
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
@@ -19,3 +18,4 @@ xdg = "*"
 home = "*"
 chrono = "0.4.22"
 regex = "1.6.0"
+chrono-humanize = "0.2.2"
