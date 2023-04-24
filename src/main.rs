@@ -49,16 +49,20 @@ struct Cli {
     #[clap(default_value_t = String::from("newest"))]
     sort: String,
 
+    /// How many days backward should we humanize dates
     #[clap(long)]
     #[clap(default_value_t = 5)]
     humanize_limit: i64,
 
+    /// Path to notmuch database
     #[clap(short, long, parse(from_os_str), value_name = "FILE")]
     db_path: Option<PathBuf>,
 
+    /// Path to notmuch config file
     #[clap(short, long, parse(from_os_str), value_name = "FILE")]
     conf_path: Option<PathBuf>,
 
+    /// Path to notmuch profile
     #[clap(short, long)]
     profile: Option<String>,
 
@@ -77,6 +81,7 @@ struct Cli {
     #[clap(default_value_t = String::from("%Y-%m-%d"))]
     date_format: String,
 
+    /// notmuch entry we want to match and highlight on
     #[clap(short, long)]
     highlight: Option<String>,
 }
