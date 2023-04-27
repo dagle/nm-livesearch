@@ -2,7 +2,7 @@ use chrono::{format::{DelayedFormat, StrftimeItems}, NaiveDateTime, DateTime, Ut
 use notmuch::Sort;
 
 pub fn show_time<'a>(date: i64, date_format: &'a str) -> DelayedFormat<StrftimeItems<'a>> {
-    let naive = NaiveDateTime::from_timestamp(date, 0);
+    let naive = NaiveDateTime::from_timestamp_opt(date, 0).expect("Couldn't parse datetime");
     let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
     datetime.format(date_format)
 }

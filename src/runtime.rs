@@ -2,7 +2,7 @@ use std::{io, collections::BinaryHeap};
 
 use chrono::{DateTime, Utc, NaiveDateTime};
 use chrono_humanize::HumanTime;
-use notmuch::{Database, Sort};
+use notmuch::{Database, Sort, Messages};
 use regex::{Regex, Captures};
 use serde::Serialize;
 
@@ -50,7 +50,8 @@ fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()>
 
 impl<'a> Runtime<'a> {
     fn humanize(&self, date: i64, pad: usize) -> String {
-        let naive = NaiveDateTime::from_timestamp(date, 0);
+        // let naive = NaiveDateTime::from_timestamp(date, 0);
+        let naive = NaiveDateTime::from_timestamp_opt(date, 0).expect("Couldn't humanize string");
         let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
 
         if datetime > self.humanize_range {
@@ -291,45 +292,84 @@ impl<'a> Runtime<'a> {
 
     pub fn show_before_message<W>(&self, id: &str, filter: Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
-        let mut query = format!("thread:{{mid:{}}}", id);
+        let mut query = format!("mid:{}", id);
         if let Some(str) = filter {
             query.push_str(" and ");
             query.push_str(str);
         }
         let q = self.db.create_query(&query)?;
-        q.set_sort(self.sort);
-        let messages = q.search_messages()?;
+        let mut threads = q.search_threads()?;
+        if let Some(thread) = threads.next() {
+            let messages = thread.toplevel_messages();
+            let bef = Self::forward(id, messages);
+
+            if let Some(bef) = bef {
+                for message in bef {
+                    let mes = Message(message, 1, 1);
+                    mes.show_message(writer)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn forward(id: &str, messages: Messages) -> Option<Vec<notmuch::Message>> {
         for message in messages {
             if message.id() == id {
-                break;
+                return Some(vec![])
             }
-            let mes = Message(message.clone(), 1, 1);
+            let messages = message.replies();
+            let path = Self::forward(id, messages);
+            if let Some(mut path) = path {
+                path.push(message);
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn search(id: &str, messages: Messages) -> Option<notmuch::Message> {
+        for message in messages {
+            if message.id() == id {
+                return Some(message);
+            }
+            let messages = message.replies();
+            let path = Self::search(id, messages);
+            if let Some(path) = path {
+                return Some(path);
+            }
+        }
+        None
+    }
+
+    fn print_tree<W>(messages: Messages, writer: &mut W) -> Result<()>
+    where W: io::Write {
+        for message in messages {
+            let rep = message.replies();
+            let mes = Message(message, 1, 1);
             mes.show_message(writer)?;
+            Self::print_tree(rep, writer)?;
         }
         Ok(())
     }
 
     pub fn show_after_message<W>(&self, id: &str, filter: Option<&str>, writer: &mut W) -> Result<()>
     where W: io::Write {
-        let mut query = format!("thread:{{mid:{}}}", id);
+        let mut query = format!("mid:{}", id);
         if let Some(str) = filter {
             query.push_str(" and ");
             query.push_str(str);
         }
         let q = self.db.create_query(&query)?;
-        q.set_sort(self.sort);
-        let messages = q.search_messages()?;
-        let mut seen = false;
-        for message in messages {
-            if message.id() == id {
-                seen = true;
-                continue;
+        let mut threads = q.search_threads()?;
+        if let Some(thread) = threads.next() {
+            let messages = thread.toplevel_messages();
+            let after = Self::search(id, messages);
+
+            if let Some(after) = after {
+                let reps = after.replies();
+                Self::print_tree(reps, writer)?;
             }
-            if !seen {
-                continue;
-            }
-            let mes = Message(message.clone(), 1, 1);
-            mes.show_message(writer)?;
         }
         Ok(())
     }
