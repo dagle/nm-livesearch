@@ -50,7 +50,6 @@ fn show_thread<W>(thread: &notmuch::Thread, writer: &mut W) -> Result<()>
 
 impl<'a> Runtime<'a> {
     fn humanize(&self, date: i64, pad: usize) -> String {
-        // let naive = NaiveDateTime::from_timestamp(date, 0);
         let naive = NaiveDateTime::from_timestamp_opt(date, 0).expect("Couldn't humanize string");
         let datetime: DateTime<Utc> = DateTime::from_utc(naive, Utc);
 
@@ -282,7 +281,6 @@ impl<'a> Runtime<'a> {
         for thread in threads {
             let id = thread.id();
             let str = self.template_thread(&self.templ.templ_message, &thread)?;
-            // TODO add highlight!
             let tuple = Show { id: id.to_string(), entry: str, highlight: false };
             serde_json::to_writer(&mut *writer, &tuple)?;
             write!(writer,"\n")?;
@@ -376,9 +374,7 @@ impl<'a> Runtime<'a> {
 
     // TODO: Merge things that are in common
     fn template_message(&self, template: &str, message: &notmuch::Message, response: Option<String>, num: i32, total: i32) -> Result<String> {
-        // let id = message.id();
         let from = message.header("From")?.unwrap_or_default();
-        // let to = message.header("To")?.unwrap_or_default();
 
         let tags: Vec<String> = message.tags().collect();
         let tags_string = tags.join(", ");
@@ -415,7 +411,6 @@ impl<'a> Runtime<'a> {
     }
 
     fn template_thread(&self, template: &str, thread: &notmuch::Thread) -> Result<String> {
-        // let id = thread.id();
         let subject = thread.subject();
         let subfixed = fix_subject(&subject);
         let authors = thread.authors().join(", ");

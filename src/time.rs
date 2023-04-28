@@ -7,7 +7,6 @@ pub fn show_time<'a>(date: i64, date_format: &'a str) -> DelayedFormat<StrftimeI
     datetime.format(date_format)
 }
 
-
 pub fn compare_time(thread: &notmuch::Thread, sort: Sort) -> i64 {
     match sort {
         Sort::OldestFirst => {
