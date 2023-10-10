@@ -45,6 +45,7 @@ fn empty(hl: Option<Highlight>) -> Option<Highlight> {
 #[derive(Parser)]
 #[clap(author, version, about, long_about = None)]
 struct Cli {
+    /// How to order the messages
     #[clap(short, long, value_name = "oldest|newest")]
     #[clap(default_value_t = String::from("newest"))]
     sort: String,
@@ -69,14 +70,17 @@ struct Cli {
     #[clap(subcommand)]
     command: Commands,
 
+    /// A template for how to print an email entry
     #[clap(short, long)]
     #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {subject} ({tags})"))]
     entry_fmt: String,
 
+    /// A template for how to print an email response in a thread
     #[clap(short, long)]
     #[clap(default_value_t = String::from("{date} [{index:02}/{total:02}] {from:25}│ {response}▶ ({tags})"))]
     response_fmt: String,
 
+    /// How to order the messages
     #[clap(long)]
     #[clap(default_value_t = String::from("%Y-%m-%d"))]
     date_format: String,
@@ -84,6 +88,14 @@ struct Cli {
     /// notmuch entry we want to match and highlight on
     #[clap(short, long)]
     highlight: Option<String>,
+
+    /// How many entries to print. Can stand for threads or emails.
+    #[clap(short, long)]
+    limit: Option<usize>,
+
+    /// How many to skip before we start to print. Can stand for threads or emails.
+    #[clap(short, long)]
+    offset: Option<usize>,
 }
 
 #[derive(Subcommand)]
@@ -159,6 +171,8 @@ fn main() -> Result<()>{
         highlight,
         humanize_range,
         date_format: args.date_format,
+        limit: args.limit,
+        offset: args.offset,
     };
 
     match &args.command {

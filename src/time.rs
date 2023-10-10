@@ -21,10 +21,12 @@ pub fn compare_time(thread: &notmuch::Thread, sort: Sort) -> i64 {
 pub fn compare_diff(current: i64, reference: i64, sort: Sort) -> bool {
     match sort {
         Sort::OldestFirst => {
-            current < reference 
+            // current < reference 
+            current > reference 
         }
         _ => {
-            current > reference 
+            // current > reference 
+            current < reference 
         }
     }
 }

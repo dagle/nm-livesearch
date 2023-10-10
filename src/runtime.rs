@@ -15,6 +15,8 @@ pub struct Runtime<'a> {
     pub highlight: Option<Highlight>,
     pub date_format: String,
     pub humanize_range: DateTime<Utc>,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
 }
 
 pub struct Templ<'a> {
@@ -66,9 +68,20 @@ impl<'a> Runtime<'a> {
             let query = self.db.create_query(str)?;
             query.set_sort(self.sort);
             let messages = query.search_messages()?;
-            for message in messages {
-                let mes = Message(message.clone(), 1, 1);
-                mes.show_message(writer)?;
+            let skip = self.offset.unwrap_or(0);
+            if let Some(limit) = self.limit {
+                for (num, message) in messages.skip(skip).enumerate() {
+                    if num >= limit {
+                        break;
+                    }
+                    let mes = Message(message, 1, 1);
+                    mes.show_message(writer)?;
+                }
+            } else {
+                for message in messages.skip(skip) {
+                    let mes = Message(message, 1, 1);
+                    mes.show_message(writer)?;
+                }
             }
             Ok(())
     }
@@ -78,8 +91,18 @@ impl<'a> Runtime<'a> {
             let query = self.db.create_query(str)?;
             query.set_sort(self.sort);
             let threads = query.search_threads()?;
-            for thread in threads {
-                show_thread(&thread, writer)?;
+            let skip = self.offset.unwrap_or(0);
+            if let Some(limit) = self.limit {
+                for (num, thread) in threads.skip(skip).enumerate() {
+                    if num >= limit {
+                        break;
+                    }
+                    show_thread(&thread, writer)?;
+                }
+            } else {
+                for thread in threads {
+                    show_thread(&thread, writer)?;
+                }
             }
             Ok(())
     }
@@ -89,25 +112,46 @@ impl<'a> Runtime<'a> {
             let query = self.db.create_query(search)?;
             query.set_sort(self.sort);
             let threads = query.search_threads()?;
-            for thread in threads {
-                let total = thread.total_messages();
-                let messages = thread.toplevel_messages();
-                let mut vec = Vec::new();
-                let mvec: Vec<notmuch::Message> = messages.collect();
-                self.show_message_tree(&mvec, 0, "".to_string(), 0, total, &mut vec)?;
-                serde_json::to_writer(&mut *writer, &vec)?;
-                write!(writer,"\n")?;
+            let skip = self.offset.unwrap_or(0);
+
+            if let Some(limit) = self.limit {
+                for (num, thread) in threads.skip(skip).enumerate() {
+                    if num >= limit {
+                        break;
+                    }
+                    let total = thread.total_messages();
+                    let messages = thread.toplevel_messages();
+                    let mut vec = Vec::new();
+                    let mvec: Vec<notmuch::Message> = messages.collect();
+                    self.show_message_tree(&mvec, 0, String::new(), 0, total, &mut vec)?;
+                    serde_json::to_writer(&mut *writer, &vec)?;
+                    write!(writer,"\n")?;
+                }
+            } else {
+                for thread in threads.skip(skip) {
+                    let total = thread.total_messages();
+                    let messages = thread.toplevel_messages();
+                    let mut vec = Vec::new();
+                    let mvec: Vec<notmuch::Message> = messages.collect();
+                    self.show_message_tree(&mvec, 0, String::new(), 0, total, &mut vec)?;
+                    serde_json::to_writer(&mut *writer, &vec)?;
+                    write!(writer,"\n")?;
+                }
             }
             Ok(())
     }
 
+    // TODO: We should create a string buffer instead of using clone where.
+    // That way we would never need to create a new string, all we need to do is push and adjust
+    // the fat-pointer
     fn show_message_tree(&self, messages: &[notmuch::Message], level: i32, prestring: String, num: i32, total: i32, vec: &mut Vec<Show>) -> Result<i32>
     {
-        let mut j = 1;
-        let length = messages.len();
+        let length = messages.len() - 1; // change name to max_idx
         let mut n = num;
-        for message in messages {
+        for (j, message) in messages.iter().enumerate() {
             let mut newstring: String = prestring.clone();
+
+            // If we are the last message
             if n == 0 {
             } else if j == length {
                 newstring.push_str("└─")
@@ -116,11 +160,13 @@ impl<'a> Runtime<'a> {
             }
 
             let replies = message.replies();
+            // Can we remove this?
             let replies_vec: Vec<notmuch::Message> = replies.collect();
 
-            if replies_vec.len()  > 0 {
+            if replies_vec.len() > 0 {
                 newstring.push_str("┬")
             } else {
+                // if we have no siblings
                 newstring.push_str("─")
             }
 
@@ -147,17 +193,15 @@ impl<'a> Runtime<'a> {
                 newstring.push_str("  ")
             }
             n = self.show_message_tree(&replies_vec, level + 1, newstring, n + 1, total, vec)?;
-            j += 1;
         }
         Ok(n)
     }
 
     fn show_message_tree_single<W>(&self, messages: &[notmuch::Message], level: i32, prestring: String, num: i32, total: i32, writer: &mut W) -> Result<i32>
     where W: io::Write {
-        let mut j = 1;
-        let length = messages.len();
+        let length = messages.len() - 1; // change name to max_idx
         let mut n = num;
-        for message in messages {
+        for (j, message) in messages.iter().enumerate() {
             let mut newstring: String = prestring.clone();
             if n == 0 {
             } else if j == length {
@@ -209,7 +253,6 @@ impl<'a> Runtime<'a> {
             if n == -1 {
                 return Ok(-1);
             }
-            j += 1;
         }
         Ok(n)
     }
