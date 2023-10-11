@@ -34,26 +34,39 @@ impl<T> Ord for OrderMessage<T> {
     }
 }
 
-pub fn flush_messages<W, T>(heap: &mut BinaryHeap<OrderMessage<T>>, sort: Sort, reference: i64, writer: &mut W) -> Result<()>
+fn skips<T>(heap: &mut BinaryHeap<OrderMessage<T>>, skip: Option<usize>) -> Option<usize> {
+    if let Some(mut s) = skip {
+        while heap.pop().is_some() {
+            s -= 1;
+            if s == 0 {
+                return None
+            }
+        }
+        return Some(s)
+    }
+    None
+}
+
+pub fn flush_messages<W, T>(heap: &mut BinaryHeap<OrderMessage<T>>, sort: Sort, reference: i64, skip: &mut Option<usize>, limit: &mut Option<usize>, writer: &mut W) -> Result<bool>
 where 
     W: io::Write,
     T: Serialize,
 {
-    loop {
-        match heap.peek() {
-            Some(value) => {
-                if !compare_diff(value.0, reference, sort) {
-                    let top = heap.pop().unwrap();
-                    serde_json::to_writer(&mut *writer, &top.2)?;
-                    write!(writer,"\n")?;
-                } else {
-                    break;
+    *skip = skips(heap, *skip);
+    while let Some(value) = heap.peek() {
+        if !compare_diff(value.0, reference, sort) {
+            if let Some(ref mut limit) = limit {
+                if *limit == 0 {
+                    return Ok(false)
                 }
+                *limit -= 1;
             }
-            None => {
-                break;
-            }
+            let top = heap.pop().unwrap();
+            serde_json::to_writer(&mut *writer, &top.2)?;
+            write!(writer,"\n")?;
+        } else {
+            break;
         }
     }
-    Ok(())
+    Ok(false)
 }

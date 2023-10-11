@@ -172,7 +172,8 @@ impl<'a> Runtime<'a> {
 
             let id = message.id();
 
-
+            // TODO: Can we even get the numbering correctly?
+            // Maybe a hashmap with id -> num
             if level > 0 && n > 0 {
                 let highlight = self.highlight.as_ref().map_or(Ok(false), |hl| hl.message(message, n+1, total))?;
                 let str = self.template_message(&self.templ.templ_respons, &message, Some(newstring), n+1, total)?;
@@ -277,11 +278,15 @@ impl<'a> Runtime<'a> {
         query.set_sort(self.sort);
         let threads = query.search_threads()?;
         let mut heap = BinaryHeap::new();
+        let mut skip = self.offset;
+        let mut limit = self.limit;
         for thread in threads {
             let reference = compare_time(&thread, self.sort);
             let total = thread.total_messages();
-            flush_messages(&mut heap, self.sort, reference, writer)?;
-            let top = thread.toplevel_messages();
+            if flush_messages(&mut heap, self.sort, reference, &mut skip, &mut limit, writer)? {
+                break;
+            }
+            let top = thread.messages();
             let mut counter = 0;
             for message in top {
                 counter = self.show_messages_helper(&message, reference, counter, total, writer, &mut heap)?;
@@ -294,7 +299,7 @@ impl<'a> Runtime<'a> {
         total: i32, writer: &mut W, heap: &mut BinaryHeap<OrderMessage<Show>>) -> Result<i32>
     where W: io::Write 
     {
-            let mut counter = num + 1;
+            let counter = num + 1;
             let matched = message.get_flag(notmuch::MessageFlag::Match);
             if matched {
                 let id = message.id();
@@ -309,9 +314,6 @@ impl<'a> Runtime<'a> {
                     serde_json::to_writer(&mut *writer, &show)?;
                     write!(writer,"\n")?;
                 }
-            }
-            for message in message.replies() {
-                counter = self.show_messages_helper(&message, reference, counter, total, writer, heap)?;
             }
             Ok(counter)
         }
